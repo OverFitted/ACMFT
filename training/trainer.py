@@ -5,6 +5,7 @@ This module provides a training framework for the ACMFT model, including
 training loops, validation, testing, and model saving/loading.
 """
 
+import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -199,82 +200,104 @@ class ACMFTTrainer:
         Process a batch of data and compute model outputs.
 
         Args:
-            batch: Batch of data with modalities and labels
-            return_features: Whether to return intermediate features
+            batch: Batch of data with modalities, masks, and labels
+            return_features: Whether to return intermediate features (weights)
 
         Returns:
             logits: Model output logits
             targets: Ground truth labels
-            features: Optional dictionary of modality features
+            features_or_weights: Optional dictionary of modality weights if return_features=True
         """
         # Extract data and move to device
         visual = batch.get("visual")
         audio = batch.get("audio")
         hr = batch.get("hr")
+        visual_mask = batch.get("visual_mask")
+        audio_mask = batch.get("audio_mask")
+        hr_mask = batch.get("hr_mask")
         targets = batch["labels"].to(self.device)
-        
+
         # Log batch information for debugging
-        print("\n===== Batch Info =====")
-        print(f"Target shape: {targets.shape}")
-        
-        if visual is not None:
-            if isinstance(visual, torch.Tensor):
-                print(f"Visual: tensor with shape {visual.shape}")
-            elif isinstance(visual, list):
-                print(f"Visual: list with {len(visual)} items")
-                if len(visual) > 0 and isinstance(visual[0], torch.Tensor):
-                    print(f"  First visual tensor shape: {visual[0].shape}")
-            else:
-                print(f"Visual: {type(visual)}")
-        else:
-            print("Visual: None")
-            
-        if audio is not None:
-            if isinstance(audio, torch.Tensor):
-                print(f"Audio: tensor with shape {audio.shape}")
-            elif isinstance(audio, list):
-                print(f"Audio: list with {len(audio)} items")
-                if len(audio) > 0 and isinstance(audio[0], torch.Tensor):
-                    print(f"  First audio tensor shape: {audio[0].shape}")
-            else:
-                print(f"Audio: {type(audio)}")
-        else:
-            print("Audio: None")
-            
-        if hr is not None:
-            if isinstance(hr, torch.Tensor):
-                print(f"HR: tensor with shape {hr.shape}")
-            elif isinstance(hr, list):
-                print(f"HR: list with {len(hr)} items")
-                if len(hr) > 0 and isinstance(hr[0], torch.Tensor):
-                    print(f"  First HR tensor shape: {hr[0].shape}")
-            else:
-                print(f"HR: {type(hr)}")
-        else:
-            print("HR: None")
-        
+        # logging.debug("\n===== Batch Info =====")
+        # logging.debug(f"Target shape: {targets.shape}")
+
+        # if visual is not None:
+        #     if isinstance(visual, torch.Tensor):
+        #         logging.debug(f"Visual: tensor with shape {visual.shape}")
+        #     elif isinstance(visual, list):
+        #         logging.debug(f"Visual: list with {len(visual)} items")
+        #         if len(visual) > 0 and isinstance(visual[0], torch.Tensor):
+        #             logging.debug(f"  First visual tensor shape: {visual[0].shape}")
+        #     else:
+        #         logging.debug(f"Visual: {type(visual)}")
+        # else:
+        #     logging.warning("Visual: None")
+
+        # if audio is not None:
+        #     if isinstance(audio, torch.Tensor):
+        #         logging.debug(f"Audio: tensor with shape {audio.shape}")
+        #     elif isinstance(audio, list):
+        #         logging.debug(f"Audio: list with {len(audio)} items")
+        #         if len(audio) > 0 and isinstance(audio[0], torch.Tensor):
+        #             logging.debug(f"  First audio tensor shape: {audio[0].shape}")
+        #     else:
+        #         logging.debug(f"Audio: {type(audio)}")
+        # else:
+        #     logging.warning("Audio: None")
+
+        # if hr is not None:
+        #     if isinstance(hr, torch.Tensor):
+        #         logging.debug(f"HR: tensor with shape {hr.shape}")
+        #     elif isinstance(hr, list):
+        #         logging.debug(f"HR: list with {len(hr)} items")
+        #         if len(hr) > 0 and isinstance(hr[0], torch.Tensor):
+        #             logging.debug(f"  First HR tensor shape: {hr[0].shape}")
+        #     else:
+        #         logging.debug(f"HR: {type(hr)}")
+        # else:
+        #     logging.warning("HR: None")
+
+        # if visual_mask is not None:
+        #     logging.debug(f"Visual Mask: tensor with shape {visual_mask.shape}, {visual_mask.sum().item()} valid")
+        # else:
+        #     logging.warning("Visual Mask: None")
+
+        # if audio_mask is not None:
+        #     logging.debug(f"Audio Mask: tensor with shape {audio_mask.shape}, {audio_mask.sum().item()} valid")
+        # else:
+        #     logging.warning("Audio Mask: None")
+
+        # if hr_mask is not None:
+        #     logging.debug(f"HR Mask: tensor with shape {hr_mask.shape}, {hr_mask.sum().item()} valid")
+        # else:
+        #     logging.warning("HR Mask: None")
+
         # Check for suspicious batch sizes - early detection of problematic batches
         if targets.size(0) == 0:
-            print("WARNING: Found empty targets batch!")
+            logging.error("Found empty targets batch!")
             import sys
+
             sys.exit("EARLY EXIT: Empty target batch detected")
-            
+
         if visual is not None and isinstance(visual, torch.Tensor) and visual.size(0) == 0:
-            print("WARNING: Found empty visual tensor!")
+            logging.error("Found empty visual tensor!")
             import sys
+
             sys.exit("EARLY EXIT: Empty visual tensor detected")
-            
+
         if audio is not None and isinstance(audio, torch.Tensor) and audio.size(0) == 0:
-            print("WARNING: Found empty audio tensor!")
+            logging.error("Found empty audio tensor!")
             import sys
+
             sys.exit("EARLY EXIT: Empty audio tensor detected")
-            
+
         if hr is not None and isinstance(hr, torch.Tensor) and hr.size(0) == 0:
-            print("WARNING: Found empty HR tensor!")
+            logging.error("Found empty HR tensor!")
             import sys
+
             sys.exit("EARLY EXIT: Empty HR tensor detected")
-        
-        # Move modality data to device if present
+
+        # Move modality data and masks to device if present
         if visual is not None:
             if isinstance(visual, list):
                 # Handle the case when the list contains numpy arrays
@@ -291,6 +314,8 @@ class ACMFTTrainer:
                 visual = visual.to(self.device)
             elif isinstance(visual, np.ndarray):
                 visual = torch.from_numpy(visual.copy()).float().to(self.device)
+            if visual_mask is not None:
+                visual_mask = visual_mask.to(self.device)
 
         if audio is not None:
             if isinstance(audio, list):
@@ -308,6 +333,8 @@ class ACMFTTrainer:
                 audio = audio.to(self.device)
             elif isinstance(audio, np.ndarray):
                 audio = torch.from_numpy(audio.copy()).float().to(self.device)
+            if audio_mask is not None:
+                audio_mask = audio_mask.to(self.device)
 
         if hr is not None:
             if isinstance(hr, list):
@@ -325,43 +352,41 @@ class ACMFTTrainer:
                 hr = hr.to(self.device)
             elif isinstance(hr, np.ndarray):
                 hr = torch.from_numpy(hr.copy()).float().to(self.device)
+            if hr_mask is not None:
+                hr_mask = hr_mask.to(self.device)
 
         # Forward pass
+        # Prepare arguments for model forward pass
+        model_kwargs = {
+            "visual": visual,
+            "audio": audio,
+            "hr": hr,
+            "visual_mask": visual_mask,
+            "audio_mask": audio_mask,
+            "hr_mask": hr_mask,
+            "return_weights": return_features,
+        }
+
+        # Check if we have an empty batch (batch_size = 0)
+        batch_size = targets.size(0)
+        if batch_size == 0:
+            logging.warning("WARNING: Empty batch detected in _process_batch before model call.")
+            # Return empty tensors that match expected output format
+            empty_logits = torch.zeros(0, self.model.config.num_emotions, device=self.device)
+            empty_weights = {
+                "visual_weight": torch.zeros(0, device=self.device),
+                "audio_weight": torch.zeros(0, device=self.device),
+                "hr_weight": torch.zeros(0, device=self.device),
+            } if return_features else None
+            return empty_logits, targets, empty_weights
+
+        # Call model forward
         if return_features:
-            # Check if we have an empty batch (batch_size = 0)
-            if (
-                (visual is not None and hasattr(visual, "size") and visual.size(0) == 0)
-                or (audio is not None and hasattr(audio, "size") and audio.size(0) == 0)
-                or (hr is not None and hasattr(hr, "size") and hr.size(0) == 0)
-                or targets.size(0) == 0
-            ):
-                # Return empty tensors that match expected output format
-                empty_logits = torch.zeros(0, self.model.config.num_emotions, device=self.device)
-                empty_features = {
-                    "visual_weight": torch.zeros(0, device=self.device),
-                    "audio_weight": torch.zeros(0, device=self.device),
-                    "hr_weight": torch.zeros(0, device=self.device),
-                }
-                return empty_logits, targets, empty_features
-
-            output, weights = self.model(visual, audio, hr, return_weights=True)
-
-            # Return logits, targets, and features
+            output, weights = self.model(**model_kwargs)
+            # Return logits, targets, and weights
             return output, targets, weights
         else:
-            # Check if we have an empty batch (batch_size = 0)
-            if (
-                (visual is not None and hasattr(visual, "size") and visual.size(0) == 0)
-                or (audio is not None and hasattr(audio, "size") and audio.size(0) == 0)
-                or (hr is not None and hasattr(hr, "size") and hr.size(0) == 0)
-                or targets.size(0) == 0
-            ):
-                # Return empty tensors that match expected output format
-                empty_logits = torch.zeros(0, self.model.config.num_emotions, device=self.device)
-                return empty_logits, targets, None
-
-            output = self.model(visual, audio, hr)
-
+            output = self.model(**model_kwargs)
             # Return logits and targets
             return output, targets, None
 
@@ -476,7 +501,7 @@ class ACMFTTrainer:
             pbar.set_postfix(
                 {
                     "loss": loss.item(),
-                    "acc": correct / targets.size(0),
+                    "acc": correct / targets.size(0) if targets.size(0) > 0 else 0.0, # Avoid division by zero
                 }
             )
 
@@ -584,7 +609,7 @@ class ACMFTTrainer:
         Returns:
             history: Dictionary of training and validation metrics history
         """
-        print(f"Starting training for {self.config.num_epochs} epochs...")
+        logging.info(f"Starting training for {self.config.num_epochs} epochs...")
 
         for epoch in range(self.current_epoch, self.config.num_epochs):
             self.current_epoch = epoch
@@ -603,7 +628,7 @@ class ACMFTTrainer:
             self.val_accs.append(val_metrics["acc"])
 
             # Print metrics
-            print(
+            logging.info(
                 f"Epoch {epoch + 1}/{self.config.num_epochs} - "
                 f"Time: {train_time:.2f}s - "
                 f"Train Loss: {train_metrics['loss']:.4f} - "
@@ -639,14 +664,14 @@ class ACMFTTrainer:
 
                 # Save best model
                 self.save_checkpoint("best_model.pt")
-                print(f"Saved best model with val loss: {self.best_val_loss:.4f} and val acc: {self.best_val_acc:.4f}")
+                logging.info(f"Saved best model with val loss: {self.best_val_loss:.4f} and val acc: {self.best_val_acc:.4f}")
 
             # Save regular checkpoint
             self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt")
 
             # Check early stopping
             if should_stop:
-                print(f"Early stopping triggered after {epoch + 1} epochs")
+                logging.info(f"Early stopping triggered after {epoch + 1} epochs")
                 break
 
         # Close tensorboard writer
@@ -711,7 +736,7 @@ class ACMFTTrainer:
         self.val_losses = checkpoint["val_losses"]
         self.val_accs = checkpoint["val_accs"]
 
-        print(
+        logging.info(
             f"Loaded checkpoint from epoch {self.current_epoch + 1} with "
             f"val loss: {self.best_val_loss:.4f} and val acc: {self.best_val_acc:.4f}"
         )

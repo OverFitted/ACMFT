@@ -5,6 +5,7 @@ This module provides functions for visualizing model training,
 evaluation results, and modality weights.
 """
 
+import logging
 from typing import Dict, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -307,7 +308,7 @@ def visualize_cross_modal_fusion(
 
                 reducer = umap.UMAP(n_components=2)
             except ImportError:
-                print("UMAP not installed. Using t-SNE instead.")
+                logging.warning("UMAP not installed. Using t-SNE instead.")
                 from sklearn.manifold import TSNE
 
                 reducer = TSNE(n_components=2, perplexity=30, n_iter=1000)
@@ -356,4 +357,4 @@ def visualize_cross_modal_fusion(
             plt.show()
 
     except Exception as e:
-        print(f"Error visualizing cross-modal fusion: {e}")
+        logging.error(f"Error visualizing cross-modal fusion: {e}")

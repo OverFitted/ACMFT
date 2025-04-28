@@ -6,6 +6,7 @@ integrating modality-specific encoders, cross-modal transformer blocks,
 and the dynamic contextual gating mechanism.
 """
 
+import logging
 from typing import Dict, Optional, Tuple, Union
 
 import torch
@@ -98,10 +99,6 @@ class ACMFT(nn.Module):
         self.contextual_gating = DynamicContextualGating(
             hidden_dim=self.config.hidden_dim,
             context_dim=self.config.hidden_dim,
-            gate_dim=self.config.hidden_dim // 2,
-            dropout=self.config.dropout,
-            use_quality_estimation=True,
-            fusion_method="weighted_sum",
         )
 
         # Create emotion classification head
@@ -156,6 +153,9 @@ class ACMFT(nn.Module):
         visual: Optional[torch.Tensor],
         audio: Optional[torch.Tensor],
         hr: Optional[torch.Tensor],
+        visual_mask: Optional[torch.Tensor] = None, # Added mask arguments
+        audio_mask: Optional[torch.Tensor] = None,
+        hr_mask: Optional[torch.Tensor] = None,
         return_weights: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
@@ -165,6 +165,9 @@ class ACMFT(nn.Module):
             visual: Visual input tensor (batch_size, ...)
             audio: Audio input tensor (batch_size, sequence_length)
             hr: Heart rate input tensor (batch_size, ...)
+            visual_mask: Boolean mask for visual modality (batch_size,)
+            audio_mask: Boolean mask for audio modality (batch_size,)
+            hr_mask: Boolean mask for HR modality (batch_size,)
             return_weights: Whether to return modality weights
 
         Returns:
@@ -184,17 +187,17 @@ class ACMFT(nn.Module):
             batch_size = hr.size(0)
             device = hr.device
 
-        print(f"ACMFT forward: batch_size={batch_size}, device={device}")
-        if visual is not None:
-            print(f"  Visual input shape: {visual.shape}")
-        if audio is not None:
-            print(f"  Audio input shape: {audio.shape}")
-        if hr is not None:
-            print(f"  HR input shape: {hr.shape}")
+        # logging.debug(f"ACMFT forward: batch_size={batch_size}, device={device}")
+        # if visual is not None:
+        #     logging.debug(f"  Visual input shape: {visual.shape}")
+        # if audio is not None:
+        #     logging.debug(f"  Audio input shape: {audio.shape}")
+        # if hr is not None:
+        #     logging.debug(f"  HR input shape: {hr.shape}")
 
         # If batch size is 0 (e.g., empty batch), return empty outputs
         if batch_size == 0:
-            print("ACMFT: Detected empty batch, returning empty output.")
+            logging.error("ACMFT: Detected empty batch, returning empty output.")
             empty_logits = torch.zeros((0, self.config.num_emotions), device=device)
             if return_weights:
                 empty_weights = {
@@ -214,27 +217,37 @@ class ACMFT(nn.Module):
         seq_len = 1  # Default sequence length after encoders (can be adapted)
 
         # Handle cases where encoders might return None or features need default values
+        # Also create default masks if they are None
         if visual_features is None:
             visual_features = torch.zeros(batch_size, seq_len, self.config.visual_dim, device=device)
-            print("  Visual features are None, using zeros.")
+            visual_mask = torch.zeros(batch_size, dtype=torch.bool, device=device) # Default mask
+            logging.warning("  Visual features are None, using zeros.")
         elif visual_features.ndim == 2:  # Add sequence dimension if missing
             visual_features = visual_features.unsqueeze(1)
+        if visual_mask is None: # Create default mask if features exist but mask is None
+            visual_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
 
         if audio_features is None:
             audio_features = torch.zeros(batch_size, seq_len, self.config.audio_dim, device=device)
-            print("  Audio features are None, using zeros.")
+            audio_mask = torch.zeros(batch_size, dtype=torch.bool, device=device) # Default mask
+            logging.warning("  Audio features are None, using zeros.")
         elif audio_features.ndim == 2:
             audio_features = audio_features.unsqueeze(1)
+        if audio_mask is None:
+            audio_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
 
         if hr_features is None:
             hr_features = torch.zeros(batch_size, seq_len, self.config.hr_dim, device=device)
-            print("  HR features are None, using zeros.")
+            hr_mask = torch.zeros(batch_size, dtype=torch.bool, device=device) # Default mask
+            # logging.warning("  HR features are None, using zeros.")
         elif hr_features.ndim == 2:
             hr_features = hr_features.unsqueeze(1)
+        if hr_mask is None:
+            hr_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
 
-        print(f"  Visual features shape after prep: {visual_features.shape}")
-        print(f"  Audio features shape after prep: {audio_features.shape}")
-        print(f"  HR features shape after prep: {hr_features.shape}")
+        # logging.debug(f"  Visual features shape after prep: {visual_features.shape}")
+        # logging.debug(f"  Audio features shape after prep: {audio_features.shape}")
+        # logging.debug(f"  HR features shape after prep: {hr_features.shape}")
 
         # Project each modality to common embedding space
         try:
@@ -242,45 +255,61 @@ class ACMFT(nn.Module):
             audio_emb = self.audio_embedding(audio_features)
             hr_emb = self.hr_embedding(hr_features)
         except Exception as e:
-            print(f"Error during modality embedding: {e}")
+            logging.error(f"Error during modality embedding: {e}")
             raise e
 
-        print(f"  Visual embedding shape: {visual_emb.shape}")
-        print(f"  Audio embedding shape: {audio_emb.shape}")
-        print(f"  HR embedding shape: {hr_emb.shape}")
+        # logging.debug(f"  Visual embedding shape: {visual_emb.shape}")
+        # logging.debug(f"  Audio embedding shape: {audio_emb.shape}")
+        # logging.debug(f"  HR embedding shape: {hr_emb.shape}")
 
         # Process through cross-modal transformer blocks
         for i, layer in enumerate(self.cross_modal_layers):
             try:
-                visual_emb, audio_emb, hr_emb = layer(visual_emb, audio_emb, hr_emb)
-                print(f"  After CrossModal Layer {i}: V={visual_emb.shape}, A={audio_emb.shape}, H={hr_emb.shape}")
+                # Pass masks to cross-modal layers if they accept them (optional)
+                # Assuming CrossModalTransformerBlock.forward accepts masks as keyword args
+                visual_emb, audio_emb, hr_emb = layer(
+                    visual_emb, audio_emb, hr_emb,
+                    visual_mask=visual_mask, audio_mask=audio_mask, hr_mask=hr_mask
+                )
+                # logging.debug(f"  After CrossModal Layer {i}: V={visual_emb.shape}, A={audio_emb.shape}, H={hr_emb.shape}")
+            except TypeError as te:
+                # Fallback if layer doesn't accept masks
+                if "mask" in str(te):
+                    visual_emb, audio_emb, hr_emb = layer(visual_emb, audio_emb, hr_emb)
+                    # logging.debug(f"  After CrossModal Layer {i} (no masks): V={visual_emb.shape}, A={audio_emb.shape}, H={hr_emb.shape}")
+                else:
+                    logging.error(f"Error in CrossModal Layer {i}: {te}")
+                    raise te
             except Exception as e:
-                print(f"Error in CrossModal Layer {i}: {e}")
+                logging.error(f"Error in CrossModal Layer {i}: {e}")
                 raise e
 
-        # Apply dynamic contextual gating
+        # Apply dynamic contextual gating - Pass masks here
         try:
-            fused, (alpha, beta, gamma) = self.contextual_gating(visual_emb, audio_emb, hr_emb)
-            print(f"  Fused shape after gating: {fused.shape}")
-            print(f"  Gating weights: alpha={alpha.shape}, beta={beta.shape}, gamma={gamma.shape}")
+            fused, (alpha, beta, gamma) = self.contextual_gating(
+                visual_emb, audio_emb, hr_emb,
+                visual_mask=visual_mask, audio_mask=audio_mask, hr_mask=hr_mask
+            )
+            # logging.debug(f"  Fused shape after gating: {fused.shape}")
+            # logging.debug(f"  Gating weights: alpha={alpha.shape}, beta={beta.shape}, gamma={gamma.shape}")
         except Exception as e:
-            print(f"Error during contextual gating: {e}")
+            logging.error(f"Error during contextual gating: {e}")
             raise e
 
         # Global pooling (if sequence length > 1)
         if fused.size(1) > 1:
             fused = torch.mean(fused, dim=1)
-            print(f"  Fused shape after pooling: {fused.shape}")
+            # logging.debug(f"  Fused shape after pooling: {fused.shape}")
         else:
             fused = fused.squeeze(1)
-            print(f"  Fused shape after squeeze: {fused.shape}")
+            # logging.debug(f"  Fused shape after squeeze: {fused.shape}")
 
         # Emotion classification
         try:
             emotion_logits = self.classifier(fused)
-            print(f"  Logits shape: {emotion_logits.shape}")
+            # logging.debug(f"  Logits shape: {emotion_logits.shape}")
         except Exception as e:
-            print(f"Error during classification: {e}")
+            logging.error(f"Error during classification: {e}")
             raise e
 
         # Return logits and optionally modality weights

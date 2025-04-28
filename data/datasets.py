@@ -11,7 +11,7 @@ import os
 import pickle
 import random
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import cv2
 import librosa
@@ -1157,168 +1157,311 @@ def create_emotion_dataloaders(
     }
 
 
-def collate_fn(batch):
+def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Custom collate function that handles None values and pads sequences.
+    Custom collate function that handles None values, pads sequences,
+    ensures consistent batch sizes across modalities using zero-padding for missing samples,
+    and adds masks for valid samples.
 
     Args:
         batch: List of samples from the dataset
 
     Returns:
-        Collated batch with padded sequences and proper handling of None values
+        Collated batch with padded sequences, consistent batch sizes, modality masks,
+        and proper handling of None values.
     """
-    # Print detailed batch information for debugging
-    print(f"\n===== Collating batch with {len(batch)} samples =====")
+    batch_size = len(batch)
+    # logging.debug(f"\n===== Collating batch with {batch_size} samples ======")
 
-    # Filter out None values for each key
     result = {}
+    keys = set(k for sample in batch for k in sample.keys())
 
-    # Get all keys from all samples
-    keys = set()
-    for sample in batch:
-        keys.update(sample.keys())
+    # --- Determine Max Lengths and Feature Dims for Modalities ---
+    # Store max lengths and determine feature dimensions for padding later
+    modality_info = {}
+    for key in ["visual", "audio", "hr"]:
+        if key in keys:
+            valid_items = [sample[key] for sample in batch if key in sample and sample[key] is not None]
+            if valid_items:
+                first_item = valid_items[0]
+                shape = None
+                dtype = torch.float32  # Default dtype
 
-    # Process each key
-    for key in sorted(list(keys)):  # Sort keys for consistent logging
-        # Collect non-None values for this key
-        values = [sample[key] for sample in batch if key in sample and sample[key] is not None]
+                if isinstance(first_item, torch.Tensor):
+                    shape = first_item.shape
+                    dtype = first_item.dtype
+                elif isinstance(first_item, np.ndarray):
+                    shape = first_item.shape
+                    # dtype remains float32 as we convert numpy to float tensors
 
-        # Log key and number of non-None values
-        print(f"Key: {key}, Non-None values: {len(values)}")
+                if shape is not None and len(shape) > 0:  # Ensure it's not a scalar
+                    # Determine sequence length dimension (usually the last one)
+                    seq_dim_index = -1
+                    # Heuristic: if audio or hr and 1D, seq dim is 0
+                    if key in ["audio", "hr"] and len(shape) == 1:
+                        seq_dim_index = 0
+                        max_len = max(
+                            item.shape[seq_dim_index]
+                            for item in valid_items
+                            if hasattr(item, "shape")
+                            and len(item.shape) > seq_dim_index
+                            and item.shape[seq_dim_index] is not None
+                        )
+                        feature_dim = ()  # No feature dim for 1D audio/hr
+                    elif len(shape) > 1:
+                        max_len = max(
+                            item.shape[seq_dim_index]
+                            for item in valid_items
+                            if hasattr(item, "shape")
+                            and len(item.shape) > abs(seq_dim_index)
+                            and item.shape[seq_dim_index] is not None
+                        )
+                        feature_dim = shape[:seq_dim_index]  # Everything except the sequence dim
+                    else:  # Scalar or unexpected shape
+                        max_len = 1
+                        feature_dim = shape
 
-        # If no valid values, set to None
-        if len(values) == 0:
+                    modality_info[key] = {
+                        "max_len": max_len,
+                        "shape": shape,
+                        "dtype": dtype,
+                        "feature_dim": feature_dim,
+                        "seq_dim_index": seq_dim_index,
+                    }
+                    # logging.debug(f"  Modality {key}: Detected shape={shape}, max_len={max_len}, feature_dim={feature_dim}, seq_dim_idx={seq_dim_index}, dtype={dtype}")
+                else:
+                    # logging.debug(f"  Modality {key}: First item has shape {shape}, treating as non-sequence or scalar.")
+                    # Treat as single item, no sequence padding needed
+                    modality_info[key] = {
+                        "max_len": 1,
+                        "shape": shape,
+                        "dtype": dtype,
+                        "feature_dim": shape,
+                        "seq_dim_index": None,
+                    }
+
+    # --- Process Each Key ---
+    for key in sorted(list(keys)):
+        is_modality = key in ["visual", "audio", "hr"]
+        mask_key = f"{key}_mask"
+
+        # Collect values, keeping track of indices for mask creation
+        values_with_indices = [(i, sample[key]) for i, sample in enumerate(batch) if key in sample and sample[key] is not None]
+
+        num_valid = len(values_with_indices)
+        # logging.debug(f"Key: {key}, Valid samples: {num_valid}/{batch_size}")
+
+        if num_valid == 0:
             result[key] = None
-            print(f"  No valid data for key {key}")
+            if is_modality:
+                result[mask_key] = torch.zeros(batch_size, dtype=torch.bool)
+            logging.warning(f"  No valid data for key {key}")
             continue
 
-        # --- START NEW PADDING/STACKING LOGIC ---
-        # Check if padding and stacking is needed (primarily for modality data)
-        needs_padding_stacking = False
-        is_modality_data = key in ["visual", "audio", "hr"]
-        first_item = values[0]
+        # --- Modality Data Processing (Padding & Masking) ---
+        if is_modality and key in modality_info:
+            info = modality_info[key]
+            max_len = info["max_len"]
+            base_shape = info["shape"]
+            dtype = info["dtype"]
+            feature_dim = info["feature_dim"]
+            seq_dim_index = info["seq_dim_index"]
 
-        if is_modality_data and isinstance(first_item, (torch.Tensor, np.ndarray)):
-            # Check if shapes differ
-            first_shape = first_item.shape
-            if not all(v.shape == first_shape for v in values if hasattr(v, "shape")):
-                needs_padding_stacking = True
+            # Determine the shape of a single padded item
+            padded_item_shape = list(base_shape)
+            needs_sequence_padding = False
+            if seq_dim_index is not None and len(padded_item_shape) > abs(seq_dim_index):
+                if padded_item_shape[seq_dim_index] != max_len:
+                    padded_item_shape[seq_dim_index] = max_len
+                    needs_sequence_padding = True
+            padded_item_shape = tuple(padded_item_shape)
 
-        if needs_padding_stacking:
-            print(f"  Padding/stacking required for key: {key}")
-            padded_tensors = []
-            max_len = 0
-            target_dim = -1  # Dimension to pad (usually the last one for time/sequence)
+            # Create the final batch tensor (filled with zeros) and the mask
+            final_tensor_shape = (batch_size, *padded_item_shape)
+            final_tensor = torch.zeros(final_tensor_shape, dtype=dtype)
+            mask = torch.zeros(batch_size, dtype=torch.bool)
 
-            # Determine max length and convert to tensors
-            valid_items = []
-            for i, v in enumerate(values):
+            # logging.debug(f"  Processing modality {key}: Target item shape={padded_item_shape}, Batch tensor shape={final_tensor.shape}")
+
+            padding_applied_count = 0
+            for i, value in values_with_indices:
                 item_tensor = None
-                if isinstance(v, np.ndarray):
-                    try:
-                        item_tensor = torch.from_numpy(v).float()
-                    except Exception as e:
-                        print(f"    Warning: Could not convert numpy array {i} for key {key}: {e}")
+                try:
+                    if isinstance(value, np.ndarray):
+                        item_tensor = torch.from_numpy(value).to(dtype)
+                    elif isinstance(value, torch.Tensor):
+                        item_tensor = value.to(dtype)
+                    else:
+                        logging.warning(f"Unexpected type {type(value)} at index {i} for key {key}")
                         continue
-                elif isinstance(v, torch.Tensor):
-                    item_tensor = v.float()  # Ensure float
-                else:
-                    print(f"    Warning: Unexpected type {type(v)} at index {i} for key {key}")
-                    continue  # Skip unexpected types
+                except Exception as e:
+                    logging.warning(f"Could not convert value {i} for key {key}: {e}")
+                    continue
 
                 if item_tensor is not None:
-                    if item_tensor.ndim == 0:
-                        print(f"    Warning: 0-dim tensor found at index {i} for key {key}. Skipping.")
-                        continue
-                    valid_items.append(item_tensor)
-                    current_len = item_tensor.size(target_dim)
-                    if current_len > max_len:
-                        max_len = current_len
+                    current_shape = item_tensor.shape
+                    # Sequence Padding logic
+                    if (
+                        needs_sequence_padding
+                        and seq_dim_index is not None
+                        and len(current_shape) > abs(seq_dim_index)
+                        and current_shape[seq_dim_index] != max_len
+                    ):
+                        pad_width = max_len - current_shape[seq_dim_index]
+                        if pad_width > 0:
+                            # Create padding tuple for the sequence dimension
+                            # Example: ndim=1, seq_dim_index=0 -> (0, pad_width)
+                            # Example: ndim=2, seq_dim_index=1 -> (0, 0, 0, pad_width)
+                            # Example: ndim=3, seq_dim_index=2 -> (0, 0, 0, 0, 0, pad_width)
+                            padding_dims = [0] * (item_tensor.ndim * 2)
+                            pad_idx = abs(seq_dim_index) - 1  # Index in reversed padding tuple
+                            padding_dims[pad_idx * 2] = pad_width  # Pad right side of the seq dim
 
-            # Pad and collect tensors
-            if not valid_items:
-                print(f"  No valid items to pad/stack for key {key}")
-                result[key] = None
-                continue
+                            try:
+                                padded_item = F.pad(item_tensor, tuple(reversed(padding_dims)), mode="constant", value=0)
+                                # Verify shape before assignment
+                                if padded_item.shape == padded_item_shape:
+                                    final_tensor[i] = padded_item
+                                    mask[i] = True
+                                    padding_applied_count += 1
+                                else:
+                                    logging.error(f"Padded shape mismatch for item {i}, key {key}. Expected {padded_item_shape}, got {padded_item.shape}")
+                            except Exception as e:
+                                logging.error(f"padding tensor {i} with shape {current_shape} for key {key}: {e}")
+                        elif pad_width == 0:
+                            if item_tensor.shape == padded_item_shape:
+                                final_tensor[i] = item_tensor
+                                mask[i] = True
+                            else:
+                                logging.warning(f"Shape mismatch (no pad) for item {i}, key {key}. Expected {padded_item_shape}, got {item_tensor.shape}")
+                        else:  # Should not happen
+                            logging.warning(f"Negative padding width for item {i}, key {key}? Skipping.")
+                    else:  # No sequence padding needed or applied
+                        if item_tensor.shape == padded_item_shape:
+                            final_tensor[i] = item_tensor
+                            mask[i] = True
+                        else:
+                            logging.warning(f"Shape mismatch for key {key}, index {i}. Expected {padded_item_shape}, got {item_tensor.shape}. Trying reshape/unsqueeze.")
+                            # Attempt common fixes like unsqueezing if needed by target shape
+                            try:
+                                reshaped_item = item_tensor.reshape(padded_item_shape)
+                                final_tensor[i] = reshaped_item
+                                mask[i] = True
+                                # logging.debug(f"      Successfully reshaped item {i}.")
+                            except Exception as reshape_err:
+                                logging.warning(f"      Reshape failed: {reshape_err}. Skipping item {i}.")
 
-            print(f"    Max length for key {key}: {max_len}")
-            for i, item_tensor in enumerate(valid_items):
-                current_len = item_tensor.size(target_dim)
-                pad_width = max_len - current_len
-                if pad_width > 0:
-                    # Create padding tuple (pad_left, pad_right, pad_top, pad_bottom, ...)
-                    # We only want to pad the target_dim (last dimension)
-                    padding_dims = [0] * (item_tensor.ndim * 2)
-                    padding_dims[0] = pad_width  # Pad right side of the last dimension
-                    try:
-                        # Use tuple(reversed(padding_dims)) for F.pad
-                        padded_item = F.pad(item_tensor, tuple(reversed(padding_dims)), mode="constant", value=0)
-                        padded_tensors.append(padded_item)
-                    except Exception as e:
-                        print(f"    Error padding tensor {i} with shape {item_tensor.shape} for key {key}: {e}")
-                        # Fallback: skip this item
-                elif pad_width == 0:
-                    padded_tensors.append(item_tensor)
-                else:  # Should not happen
-                    print(f"    Warning: Negative padding width for item {i}, key {key}? Skipping.")
+            result[key] = final_tensor
+            result[mask_key] = mask
+            # if padding_applied_count > 0:
+            #     logging.debug(f"  Sequence padding applied for {padding_applied_count} items in key {key}")
+            # logging.debug(f"  Final shape for {key}: {result[key].shape}, Mask shape: {result[mask_key].shape}")
 
-            # Stack the padded tensors
-            if padded_tensors:
-                try:
-                    result[key] = torch.stack(padded_tensors)
-                    print(f"  Successfully padded/stacked {len(padded_tensors)} items for key {key}: {result[key].shape}")
-                except Exception as e:
-                    print(f"  Error stacking padded tensors for key {key}: {e}")
-                    # Fallback: return the list of padded tensors (less ideal)
-                    result[key] = padded_tensors
-            else:
-                print(f"  No tensors left after padding attempt for key {key}")
-                result[key] = None
-        # --- END NEW PADDING/STACKING LOGIC ---
+        # --- Non-Modality Data Processing (Stacking/List) ---
         else:
-            # --- UNIFORM SHAPE OR NON-MODALITY DATA ---
+            valid_values = [v for _, v in values_with_indices]
+            first_item = valid_values[0]
             try:
                 if isinstance(first_item, torch.Tensor):
-                    result[key] = torch.stack(values)
-                    if is_modality_data or key == "labels":
-                        print(f"  Stacked uniform tensors for key {key}: {result[key].shape}")
+                    try:
+                        stacked_tensor = torch.stack(valid_values)
+                        # Ensure full batch size, padding with default if necessary
+                        if stacked_tensor.shape[0] != batch_size:
+                            logging.debug(f"  Correcting tensor size for key {key} from {stacked_tensor.shape[0]} to {batch_size}")
+                            corrected_tensor = torch.zeros((batch_size, *stacked_tensor.shape[1:]), dtype=stacked_tensor.dtype)
+                            valid_indices = [i for i, _ in values_with_indices]
+                            corrected_tensor[valid_indices] = stacked_tensor
+                            result[key] = corrected_tensor
+                        else:
+                            result[key] = stacked_tensor
+                        if key == "labels":
+                            # logging.debug(f"  Stacked uniform tensors for key {key}: {result[key].shape}")
+                            pass
+                    except RuntimeError as stack_err:
+                        logging.warning(f"  Stacking failed for key {key}: {stack_err}. Keeping as list.")
+                        result[key] = valid_values  # Fallback to list
                 elif isinstance(first_item, np.ndarray):
-                    tensor_vals = [torch.from_numpy(v).float() for v in values]
-                    result[key] = torch.stack(tensor_vals)
-                    if is_modality_data:
-                        print(f"  Stacked uniform numpy arrays for key {key}: {result[key].shape}")
+                    tensor_vals = [torch.from_numpy(v).float() for v in valid_values]
+                    try:
+                        stacked_tensor = torch.stack(tensor_vals)
+                        if stacked_tensor.shape[0] != batch_size:
+                            # logging.debug(f"  Correcting tensor size for key {key} (numpy) from {stacked_tensor.shape[0]} to {batch_size}")
+                            corrected_tensor = torch.zeros((batch_size, *stacked_tensor.shape[1:]), dtype=stacked_tensor.dtype)
+                            valid_indices = [i for i, _ in values_with_indices]
+                            corrected_tensor[valid_indices] = stacked_tensor
+                            result[key] = corrected_tensor
+                        else:
+                            result[key] = stacked_tensor
+                    except RuntimeError as stack_err:
+                        logging.warning(f"  Stacking failed for key {key} (numpy): {stack_err}. Keeping as list.")
+                        result[key] = valid_values  # Fallback to original numpy list
                 elif isinstance(first_item, (int, float)):
-                    result[key] = torch.tensor(values)
+                    # Create tensor and ensure full batch size, padding with 0 or NaN?
+                    tensor_vals = torch.tensor(valid_values)
+                    if tensor_vals.shape[0] != batch_size:
+                        # logging.debug(f"  Correcting tensor size for key {key} (numeric) from {tensor_vals.shape[0]} to {batch_size}")
+                        # Pad with 0 for numeric types, maybe -1 for labels later
+                        pad_value = -1 if key == "labels" else 0
+                        corrected_tensor = torch.full((batch_size, *tensor_vals.shape[1:]), pad_value, dtype=tensor_vals.dtype)
+                        valid_indices = [i for i, _ in values_with_indices]
+                        corrected_tensor[valid_indices] = tensor_vals
+                        result[key] = corrected_tensor
+                    else:
+                        result[key] = tensor_vals
                 elif isinstance(first_item, (str, bool)):
-                    # Cannot convert str/bool directly usually, keep as list
-                    result[key] = values
+                    # Keep as list, but ensure it has batch_size elements, padding with None or default
+                    corrected_list = [None] * batch_size
+                    for i, val in values_with_indices:
+                        corrected_list[i] = val
+                    result[key] = corrected_list
                 else:
-                    # Keep as list for other types
-                    print(f"  Keeping key {key} as list (type: {type(first_item)})")
-                    result[key] = values
+                    # logging.debug(f"  Keeping key {key} as list (type: {type(first_item)}) with padding")
+                    corrected_list = [None] * batch_size
+                    for i, val in values_with_indices:
+                        corrected_list[i] = val
+                    result[key] = corrected_list
             except Exception as e:
-                print(f"  Error processing key {key} (type: {type(first_item)}): {e}. Keeping as list.")
-                # Fallback to list if any conversion/stacking fails
-                result[key] = values
+                logging.error(f"  Error processing key {key} (type: {type(first_item)}): {e}. Keeping as list with padding.")
+                corrected_list = [None] * batch_size
+                for i, val in values_with_indices:
+                    corrected_list[i] = val
+                result[key] = corrected_list
 
-    # Final checks on batch structure
+            # Final check for labels specifically if it ended up as a list
+            if key == "labels" and isinstance(result[key], list):
+                # logging.debug("  Converting labels list to tensor with padding (-1)")
+                # Convert list (potentially with Nones) to tensor, using -1 for None
+                dtype = torch.long  # Default for labels
+                # Try to infer dtype from first valid label if possible
+                first_valid_label = next((v for v in result[key] if v is not None), None)
+                if isinstance(first_valid_label, int):
+                    dtype = torch.long
+                elif isinstance(first_valid_label, float):
+                    dtype = torch.float
+
+                tensor_labels = torch.full((batch_size,), -1, dtype=dtype)
+                for i, val in enumerate(result[key]):
+                    if val is not None:
+                        try:
+                            tensor_labels[i] = torch.tensor(val, dtype=dtype)
+                        except TypeError:
+                            logging.warning(f"Could not convert label '{val}' at index {i} to tensor. Keeping -1.")
+                result[key] = tensor_labels
+
+    # Final checks
     if "labels" in result and result["labels"] is not None:
-        if isinstance(result["labels"], torch.Tensor):
-            print(f"Final batch labels shape: {result['labels'].shape}")
-        else:
-            print(f"Final batch labels is not a tensor: {type(result['labels'])}")
+        # logging.debug(f"Final batch labels shape: {result['labels'].shape}")
+        pass
     else:
-        print("WARNING: Batch has no labels!")
+        logging.warning("Batch has no labels!")
 
     for key in ["visual", "audio", "hr"]:
         if key in result and result[key] is not None:
-            if isinstance(result[key], torch.Tensor):
-                print(f"Final batch {key} shape: {result[key].shape}")
-            else:
-                print(f"Final batch {key} is not a tensor: {type(result[key])}")
+            # logging.debug(f"Final batch {key} shape: {result[key].shape}, Mask: {result.get(f'{key}_mask', torch.zeros(1)).sum().item()} valid")
+            pass
         else:
-            print(f"Final batch has no {key} data")
+            if key != "hr":
+                logging.warning(f"Final batch has no {key} data")
 
-    print("=====================================")
-
+    # logging.debug("=====================================")
     return result

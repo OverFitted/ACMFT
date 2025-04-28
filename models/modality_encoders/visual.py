@@ -6,6 +6,7 @@ using YOLOv11 for face detection and alignment, followed by ResNet/FaceNet for
 feature extraction.
 """
 
+import logging
 from typing import List, Tuple, Union
 
 import numpy as np
@@ -19,7 +20,7 @@ try:
     from facenet_pytorch import InceptionResnetV1  # Keep FaceNet for feature extraction
     from ultralytics import YOLO
 except ImportError:
-    print("Warning: required dependencies not installed. Install with: pip install ultralytics facenet-pytorch")
+    logging.warning("Warning: required dependencies not installed. Install with: pip install ultralytics facenet-pytorch")
 
 
 class YOLOFaceDetector(nn.Module):
@@ -110,7 +111,7 @@ class YOLOFaceDetector(nn.Module):
                         try:
                             face, prob = self._process_single_image(single_image)
                         except Exception as single_e:
-                            print(f"Error processing image {i} in batch: {single_e}")
+                            logging.error(f"Error processing image {i} in batch: {single_e}")
                             face, prob = None, 0.0  # Mark as failed
 
                         # Handle cases where face detection might fail for an image in the batch
@@ -146,7 +147,7 @@ class YOLOFaceDetector(nn.Module):
                 try:
                     face, prob = self._process_single_image(images)
                 except Exception as single_e:
-                    print(f"Error processing single image: {single_e}")
+                    logging.error(f"Error processing single image: {single_e}")
                     face, prob = None, 0.0
 
                 if face is not None:
@@ -166,7 +167,7 @@ class YOLOFaceDetector(nn.Module):
                     probs = torch.zeros(1, device=self.device)
 
         except Exception as e:  # Catch errors in the overall batch logic
-            print(f"Error during face detection batch processing: {e}")
+            logging.error(f"Error during face detection batch processing: {e}")
             # Ensure consistent return shape on error, try to determine batch size if possible
             batch_size_on_error = 0  # Default to 0 for unknown/error state
             if isinstance(images, torch.Tensor) and images.ndim == 4:
@@ -194,9 +195,7 @@ class YOLOFaceDetector(nn.Module):
 
             # Final check for shape consistency
             if faces.shape[0] != probs.shape[0]:
-                print(
-                    f"Warning: Mismatch between faces batch size ({faces.shape[0]}) and probs batch size ({probs.shape[0]}). Adjusting."
-                )
+                logging.warning(f"Warning: Mismatch between faces batch size ({faces.shape[0]}) and probs batch size ({probs.shape[0]}). Adjusting.")
                 # Attempt to fix based on probs size, assuming probs is more reliable after list processing
                 target_bs = probs.shape[0]
                 # Fallback to zeros with the target batch size
@@ -244,7 +243,7 @@ class YOLOFaceDetector(nn.Module):
                     img_np = (image.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
                 else:
                     # For other channel configurations, try to handle gracefully
-                    print(f"Warning: Unexpected tensor shape: {image.shape}")
+                    logging.warning(f"Warning: Unexpected tensor shape: {image.shape}")
                     if image.shape[0] == 224 and image.shape[1] == 224 and image.shape[2] == 3:
                         # This is likely a [224, 224, 3] tensor in HWC format
                         img_np = (image.cpu().numpy() * 255).astype(np.uint8)
@@ -287,7 +286,7 @@ class YOLOFaceDetector(nn.Module):
             img_np = np.concatenate([img_np] * 3, axis=-1)  # Convert to RGB
         elif img_np.ndim == 3 and img_np.shape[-1] != 3 and img_np.shape[-1] != 4:
             # Handle unusual channel configuration
-            print(f"Warning: Unusual image shape {img_np.shape}, attempting to reshape")
+            logging.warning(f"Warning: Unusual image shape {img_np.shape}, attempting to reshape")
             if img_np.shape[0] == 3 or img_np.shape[0] == 4:  # Possibly channel-first format
                 img_np = np.transpose(img_np, (1, 2, 0))
                 if img_np.shape[-1] == 4:  # RGBA
@@ -299,7 +298,7 @@ class YOLOFaceDetector(nn.Module):
 
         # Ensure we have a valid image at this point
         if img_np.shape[0] == 0 or img_np.shape[1] == 0:
-            print(f"Warning: Invalid image shape after processing: {img_np.shape}")
+            logging.warning(f"Warning: Invalid image shape after processing: {img_np.shape}")
             return None, 0.0
 
         try:
@@ -338,7 +337,7 @@ class YOLOFaceDetector(nn.Module):
 
                     return face_tensor, conf
         except Exception as e:
-            print(f"Error during YOLO face detection: {e}")
+            logging.error(f"Error during YOLO face detection: {e}")
             return None, 0.0
 
         # Return None if no face detected
@@ -509,7 +508,7 @@ class VisualEncoder(nn.Module):
                         img_pil = img
                     else:
                         # Handle unexpected type or raise error
-                        print(f"Warning: Unsupported image type {type(img)} when detect_faces=False")
+                        logging.warning(f"Warning: Unsupported image type {type(img)} when detect_faces=False")
                         continue  # Or handle appropriately
                     # Resize and convert to tensor (assuming 3 channels)
                     img_resized = img_pil.resize((self.face_detector.image_size, self.face_detector.image_size))

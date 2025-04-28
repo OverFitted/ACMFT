@@ -6,81 +6,110 @@ adaptively weighs the importance of each modality (visual, audio, HR)
 based on the current context and reliability of the modalities.
 """
 
-from typing import Tuple
+import logging
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
+
 
 class ContextEncoder(nn.Module):
     """
-    Encodes the global context across all modalities to inform the gating decisions.
+    Encodes the context from multimodal features for gating.
+    Uses average pooling followed by linear layers.
     """
 
-    def __init__(self, hidden_dim: int, context_dim: int = 256, dropout: float = 0.1):
+    def __init__(self, hidden_dim: int, context_dim: int):
         super().__init__()
-        self.visual_encoder = nn.Sequential(nn.Linear(hidden_dim, context_dim), nn.ReLU(), nn.Dropout(dropout))
-
-        self.audio_encoder = nn.Sequential(nn.Linear(hidden_dim, context_dim), nn.ReLU(), nn.Dropout(dropout))
-
-        self.hr_encoder = nn.Sequential(nn.Linear(hidden_dim, context_dim), nn.ReLU(), nn.Dropout(dropout))
-
-        self.global_context = nn.Sequential(nn.Linear(context_dim * 3, context_dim), nn.ReLU(), nn.Dropout(dropout))
+        self.pool = nn.AdaptiveAvgPool1d(1)  # Pool across sequence length
+        self.fc1 = nn.Linear(hidden_dim, context_dim)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(context_dim, hidden_dim)  # Output matches modality dim
 
     def forward(
         self,
-        visual: torch.Tensor,
-        audio: torch.Tensor,
-        hr: torch.Tensor,
-    ) -> torch.Tensor:
+        visual_feat: torch.Tensor,
+        audio_feat: torch.Tensor,
+        hr_feat: torch.Tensor,
+        visual_mask: torch.Tensor,
+        audio_mask: torch.Tensor,
+        hr_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass for the context encoder.
+        Forward pass for context encoding.
 
         Args:
-            visual: Visual features (batch_size, seq_len, hidden_dim)
-            audio: Audio features (batch_size, seq_len, hidden_dim)
-            hr: HR features (batch_size, seq_len, hidden_dim)
+            visual_feat: Visual features (batch, seq_len, hidden_dim)
+            audio_feat: Audio features (batch, seq_len, hidden_dim)
+            hr_feat: HR features (batch, seq_len, hidden_dim)
+            visual_mask: Mask for valid visual samples (batch,)
+            audio_mask: Mask for valid audio samples (batch,)
+            hr_mask: Mask for valid hr samples (batch,)
 
         Returns:
-            context: Global context tensor (batch_size, context_dim)
+            Dictionary containing encoded context for each modality.
         """
-        # Check for empty or problematic inputs
-        if isinstance(visual, torch.Tensor) and visual.size(0) == 0:
-            # Return empty context for empty batch
-            context_dim = self.visual_encoder[0].out_features
-            return torch.zeros(0, context_dim, device=visual.device)
-            
-        if isinstance(visual, list) or not isinstance(visual, torch.Tensor):
-            print(f"ContextEncoder - WARNING: visual input is {type(visual)}, not a tensor!")
-            raise ValueError(f"ContextEncoder requires tensor inputs, got {type(visual)} for visual")
-            
-        # Log input shapes for debugging
-        print(f"ContextEncoder - Input shapes: visual={visual.shape}, audio={audio.shape}, hr={hr.shape}")
-        
-        # Global pooling for each modality to get a single vector
-        visual_pooled = torch.mean(visual, dim=1)  # (batch_size, hidden_dim)
-        audio_pooled = torch.mean(audio, dim=1)  # (batch_size, hidden_dim)
-        hr_pooled = torch.mean(hr, dim=1)  # (batch_size, hidden_dim)
-        
-        print(f"ContextEncoder - Pooled shapes: visual={visual_pooled.shape}, audio={audio_pooled.shape}, hr={hr_pooled.shape}")
+        encoded_contexts = {}
+        logger.debug(f"ContextEncoder - Input shapes: visual={visual_feat.shape if visual_feat is not None else None}, "
+                     f"audio={audio_feat.shape if audio_feat is not None else None}, "
+                     f"hr={hr_feat.shape if hr_feat is not None else None}")
+        logger.debug(f"ContextEncoder - Masks: V={visual_mask.sum().item()}, A={audio_mask.sum().item()}, H={hr_mask.sum().item()}")
 
-        # Encode each modality
-        visual_encoded = self.visual_encoder(visual_pooled)  # (batch_size, context_dim)
-        audio_encoded = self.audio_encoder(audio_pooled)  # (batch_size, context_dim)
-        hr_encoded = self.hr_encoder(hr_pooled)  # (batch_size, context_dim)
-        
-        print(f"ContextEncoder - Encoded shapes: visual={visual_encoded.shape}, audio={audio_encoded.shape}, hr={hr_encoded.shape}")
+        for name, feat, mask in [
+            ("visual", visual_feat, visual_mask),
+            ("audio", audio_feat, audio_mask),
+            ("hr", hr_feat, hr_mask),
+        ]:
+            if feat is not None and mask.any():
+                # Permute for pooling: (batch, hidden_dim, seq_len)
+                pooled = self.pool(feat.permute(0, 2, 1)).squeeze(-1)  # (batch, hidden_dim)
+                logger.debug(f"ContextEncoder - Pooled {name} shape: {pooled.shape}")
 
-        # Concatenate the encoded representations
-        concat_context = torch.cat([visual_encoded, audio_encoded, hr_encoded], dim=1)  # (batch_size, context_dim * 3)
-        print(f"ContextEncoder - Concat context shape: {concat_context.shape}")
+                # Apply layers
+                encoded = self.fc2(self.relu(self.fc1(pooled)))  # (batch, hidden_dim)
+                logger.debug(f"ContextEncoder - Encoded {name} shape: {encoded.shape}")
 
-        # Create global context
-        global_context = self.global_context(concat_context)  # (batch_size, context_dim)
-        print(f"ContextEncoder - Global context shape: {global_context.shape}")
+                # Zero out context for invalid samples
+                encoded = encoded * mask.unsqueeze(-1).float()  # Ensure mask is broadcastable
+                encoded_contexts[name] = encoded
+            else:
+                # If modality is entirely missing or masked out, provide zero context
+                # Need to know the hidden_dim
+                if feat is not None:  # Use feat's dim if available
+                    h_dim = feat.shape[-1]
+                    b_dim = feat.shape[0]
+                else:  # Infer from other features or default
+                    other_feats = [
+                        f
+                        for f_name, f, m in [
+                            ("visual", visual_feat, visual_mask),
+                            ("audio", audio_feat, audio_mask),
+                            ("hr", hr_feat, hr_mask),
+                        ]
+                        if f is not None
+                    ]
+                    if other_feats:
+                        h_dim = other_feats[0].shape[-1]
+                        b_dim = other_feats[0].shape[0]
+                    else:
+                        # This case should ideally not happen if at least one modality exists
+                        logger.warning("ContextEncoder: Cannot infer hidden_dim, defaulting to a common value (e.g., 256)")
+                        h_dim = 256  # Default guess
+                        b_dim = visual_mask.shape[0]  # Get batch dim from mask
 
-        return global_context
+                encoded_contexts[name] = torch.zeros(
+                    b_dim,
+                    h_dim,
+                    device=visual_mask.device
+                    if visual_mask is not None
+                    else (audio_mask.device if audio_mask is not None else hr_mask.device),
+                )
+                logger.debug(f"ContextEncoder - Zero context for {name} shape: {encoded_contexts[name].shape}")
+
+        return encoded_contexts
 
 
 class ModalityQualityEstimator(nn.Module):
@@ -139,318 +168,188 @@ class ModalityQualityEstimator(nn.Module):
 
 class GatingNetwork(nn.Module):
     """
-    Dynamic Contextual Gating Network that determines the importance of each modality
-    based on the global context and estimated quality of each modality.
+    Calculates gating weights (alpha, beta, gamma) based on encoded context.
     """
 
-    def __init__(
-        self,
-        hidden_dim: int,
-        context_dim: int = 256,
-        gate_dim: int = 128,
-        dropout: float = 0.1,
-        use_quality_estimation: bool = True,
-    ):
+    def __init__(self, hidden_dim: int):
         super().__init__()
-        self.use_quality_estimation = use_quality_estimation
+        # Linear layers to compute gating parameters from context
+        self.gate_v = nn.Linear(hidden_dim, 1)
+        self.gate_a = nn.Linear(hidden_dim, 1)
+        self.gate_h = nn.Linear(hidden_dim, 1)
 
-        # Context encoder
-        self.context_encoder = ContextEncoder(hidden_dim=hidden_dim, context_dim=context_dim, dropout=dropout)
-
-        # Quality estimator (optional)
-        if use_quality_estimation:
-            self.quality_estimator = ModalityQualityEstimator(hidden_dim=hidden_dim, quality_dim=gate_dim // 2, dropout=dropout)
-
-        # Gating network
-        gate_input_dim = context_dim
-        if use_quality_estimation:
-            gate_input_dim += 3  # Add quality scores
-
-        self.gate_network = nn.Sequential(
-            nn.Linear(gate_input_dim, gate_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(gate_dim, 3),  # 3 modalities
-        )
-
-    def forward(
-        self,
-        visual: torch.Tensor,
-        audio: torch.Tensor,
-        hr: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, context_v: torch.Tensor, context_a: torch.Tensor, context_h: torch.Tensor) -> tuple:
         """
-        Compute dynamic weights for each modality.
+        Forward pass for gating network.
 
         Args:
-            visual: Visual features (batch_size, seq_len, hidden_dim)
-            audio: Audio features (batch_size, seq_len, hidden_dim)
-            hr: HR features (batch_size, seq_len, hidden_dim)
+            context_v: Encoded visual context (batch, hidden_dim)
+            context_a: Encoded audio context (batch, hidden_dim)
+            context_h: Encoded HR context (batch, hidden_dim)
 
         Returns:
-            alpha: Weight for visual modality (batch_size, 1)
-            beta: Weight for audio modality (batch_size, 1)
-            gamma: Weight for HR modality (batch_size, 1)
+            Tuple of gating weights (alpha, beta, gamma) after softmax.
         """
-        # Log input tensor shapes for debugging
-        print(f"GatingNetwork - Input shapes: visual={visual.shape if isinstance(visual, torch.Tensor) else type(visual)}, "
-              f"audio={audio.shape if isinstance(audio, torch.Tensor) else type(audio)}, "
-              f"hr={hr.shape if isinstance(hr, torch.Tensor) else type(hr)}")
-        
-        # Check for empty batch
-        if isinstance(visual, torch.Tensor) and visual.size(0) == 0:
-            # Return default equal weights for empty batch
-            device = visual.device
-            zeros = torch.zeros(0, 1, device=device)
-            print("GatingNetwork - Empty batch detected in visual, returning empty tensors")
-            return zeros, zeros, zeros
-            
-        if isinstance(audio, torch.Tensor) and audio.size(0) == 0:
-            # Return default equal weights for empty batch
-            device = audio.device
-            zeros = torch.zeros(0, 1, device=device)
-            print("GatingNetwork - Empty batch detected in audio, returning empty tensors")
-            return zeros, zeros, zeros
-            
-        if isinstance(hr, torch.Tensor) and hr.size(0) == 0:
-            # Return default equal weights for empty batch
-            device = hr.device
-            zeros = torch.zeros(0, 1, device=device)
-            print("GatingNetwork - Empty batch detected in hr, returning empty tensors")
-            return zeros, zeros, zeros
+        logger.debug(f"GatingNetwork - Input shapes: visual={context_v.shape if context_v is not None else None}, "
+                     f"audio={context_a.shape if context_a is not None else None}, "
+                     f"hr={context_h.shape if context_h is not None else None}")
 
-        # Encode context
-        context = self.context_encoder(visual, audio, hr)
-        print(f"GatingNetwork - Context shape: {context.shape}")
+        # Compute raw gating scores
+        score_v = (
+            self.gate_v(context_v)
+            if context_v is not None
+            else torch.zeros(
+                context_a.shape[0] if context_a is not None else context_h.shape[0],
+                1,
+                device=context_v.device
+                if context_v is not None
+                else (context_a.device if context_a is not None else context_h.device),
+            ).fill_(-float("inf"))
+        )  # Use -inf for missing
+        score_a = (
+            self.gate_a(context_a)
+            if context_a is not None
+            else torch.zeros(
+                context_v.shape[0] if context_v is not None else context_h.shape[0],
+                1,
+                device=context_a.device
+                if context_a is not None
+                else (context_v.device if context_v is not None else context_h.device),
+            ).fill_(-float("inf"))
+        )
+        score_h = (
+            self.gate_h(context_h)
+            if context_h is not None
+            else torch.zeros(
+                context_v.shape[0] if context_v is not None else context_a.shape[0],
+                1,
+                device=context_h.device
+                if context_h is not None
+                else (context_v.device if context_v is not None else context_a.device),
+            ).fill_(-float("inf"))
+        )
 
-        # Estimate quality scores (optional)
-        if self.use_quality_estimation:
-            visual_quality, audio_quality, hr_quality = self.quality_estimator(visual, audio, hr)
-            print(f"GatingNetwork - Quality scores: visual={visual_quality.shape}, audio={audio_quality.shape}, hr={hr_quality.shape}")
-            
-            # Concatenate context with quality scores
-            gate_input = torch.cat(
-                [context, visual_quality.squeeze(-1), audio_quality.squeeze(-1), hr_quality.squeeze(-1)], dim=1
-            )
-        else:
-            gate_input = context
+        # Ensure scores are on the same device
+        device = score_v.device
+        score_a = score_a.to(device)
+        score_h = score_h.to(device)
 
-        print(f"GatingNetwork - Gate input shape: {gate_input.shape}")
+        # Concatenate scores for softmax
+        scores = torch.cat([score_v, score_a, score_h], dim=1)  # (batch, 3)
 
-        # Compute unnormalized gating scores
-        gate_scores = self.gate_network(gate_input)  # (batch_size, 3)
-        print(f"GatingNetwork - Gate scores shape: {gate_scores.shape}, values: {gate_scores[:2] if gate_scores.size(0) > 1 else gate_scores}")
+        # Apply softmax to get weights
+        weights = F.softmax(scores, dim=1)  # (batch, 3)
 
-        # Apply softmax to get normalized weights (sum to 1)
-        modality_weights = F.softmax(gate_scores, dim=1)  # (batch_size, 3)
-        print(f"GatingNetwork - Modality weights after softmax: {modality_weights[:2] if modality_weights.size(0) > 1 else modality_weights}")
-
-        # Extract individual modality weights
-        alpha = modality_weights[:, 0].unsqueeze(1)  # Visual weight
-        beta = modality_weights[:, 1].unsqueeze(1)  # Audio weight
-        gamma = modality_weights[:, 2].unsqueeze(1)  # HR weight
-        
-        print(f"GatingNetwork - Final weights: alpha={alpha.shape}, beta={beta.shape}, gamma={gamma.shape}")
+        # Split weights
+        alpha = weights[:, 0:1]  # (batch, 1)
+        beta = weights[:, 1:2]  # (batch, 1)
+        gamma = weights[:, 2:3]  # (batch, 1)
 
         return alpha, beta, gamma
 
 
 class DynamicContextualGating(nn.Module):
     """
-    Complete Dynamic Contextual Gating module that adaptively fuses multimodal features.
+    Applies dynamic contextual gating to fuse multimodal features.
     """
 
-    def __init__(
-        self,
-        hidden_dim: int,
-        context_dim: int = 256,
-        gate_dim: int = 128,
-        dropout: float = 0.1,
-        use_quality_estimation: bool = True,
-        fusion_method: str = "weighted_sum",
-    ):
+    def __init__(self, hidden_dim: int, context_dim: int):
         super().__init__()
-        self.fusion_method = fusion_method
-
-        # Gating network
-        self.gating_network = GatingNetwork(
-            hidden_dim=hidden_dim,
-            context_dim=context_dim,
-            gate_dim=gate_dim,
-            dropout=dropout,
-            use_quality_estimation=use_quality_estimation,
-        )
-
-        # Additional projection for more complex fusion (optional)
-        if fusion_method == "concat_projection":
-            self.fusion_projection = nn.Sequential(nn.Linear(hidden_dim * 3, hidden_dim), nn.ReLU(), nn.Dropout(dropout))
+        self.context_encoder = ContextEncoder(hidden_dim, context_dim)
+        self.gating_network = GatingNetwork(hidden_dim)
+        self.hidden_dim = hidden_dim
 
     def forward(
         self,
-        visual: torch.Tensor,
-        audio: torch.Tensor,
-        hr: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        visual_feat: torch.Tensor,
+        audio_feat: torch.Tensor,
+        hr_feat: torch.Tensor,
+        visual_mask: torch.Tensor,
+        audio_mask: torch.Tensor,
+        hr_mask: torch.Tensor,
+    ) -> tuple:
         """
-        Dynamically fuse multimodal features based on context.
+        Forward pass for dynamic contextual gating.
 
         Args:
-            visual: Visual features (batch_size, seq_len, hidden_dim)
-            audio: Audio features (batch_size, seq_len, hidden_dim)
-            hr: HR features (batch_size, seq_len, hidden_dim)
+            visual_feat: Visual features (batch, seq_len, hidden_dim)
+            audio_feat: Audio features (batch, seq_len, hidden_dim)
+            hr_feat: HR features (batch, seq_len, hidden_dim)
+            visual_mask: Mask for valid visual samples (batch,)
+            audio_mask: Mask for valid audio samples (batch,)
+            hr_mask: Mask for valid hr samples (batch,)
 
         Returns:
-            fused: Fused multimodal representation (batch_size, seq_len, hidden_dim)
-            weights: Tuple of (alpha, beta, gamma) weights for visualization
+            Tuple containing:
+                - fused_features: Fused multimodal features (batch, seq_len, hidden_dim)
+                - gating_weights: Tuple of (alpha, beta, gamma) weights (batch, 1)
         """
-        # Log input tensor shapes for debugging
-        print(f"DynamicContextualGating - Input shapes: visual={visual.shape if isinstance(visual, torch.Tensor) else type(visual)}, "
-              f"audio={audio.shape if isinstance(audio, torch.Tensor) else type(audio)}, "
-              f"hr={hr.shape if isinstance(hr, torch.Tensor) else type(hr)}")
-              
-        # Check for list inputs and convert them to tensors if needed
-        if isinstance(visual, list):
-            if len(visual) == 0:
-                print("DynamicContextualGating - WARNING: visual is an empty list!")
-                # Create a default empty tensor
-                device = audio.device if isinstance(audio, torch.Tensor) else (
-                    hr.device if isinstance(hr, torch.Tensor) else torch.device('cpu'))
-                visual = torch.zeros(0, 1, 256, device=device)  # Default empty shape
-            else:
-                try:
-                    # Try to stack the tensors in the list
-                    visual = torch.stack(visual)
-                    print(f"DynamicContextualGating - Stacked visual list to tensor of shape {visual.shape}")
-                except Exception as e:
-                    print(f"DynamicContextualGating - ERROR: Could not stack visual list: {e}")
-                    # Create a default empty tensor
-                    device = audio.device if isinstance(audio, torch.Tensor) else (
-                        hr.device if isinstance(hr, torch.Tensor) else torch.device('cpu'))
-                    visual = torch.zeros(0, 1, 256, device=device)  # Default empty shape
-        
-        if isinstance(audio, list):
-            if len(audio) == 0:
-                print("DynamicContextualGating - WARNING: audio is an empty list!")
-                # Create a default empty tensor
-                device = visual.device if isinstance(visual, torch.Tensor) else (
-                    hr.device if isinstance(hr, torch.Tensor) else torch.device('cpu'))
-                audio = torch.zeros(0, 1, 256, device=device)  # Default empty shape
-            else:
-                try:
-                    # Try to stack the tensors in the list
-                    audio = torch.stack(audio)
-                    print(f"DynamicContextualGating - Stacked audio list to tensor of shape {audio.shape}")
-                except Exception as e:
-                    print(f"DynamicContextualGating - ERROR: Could not stack audio list: {e}")
-                    # Create a default empty tensor
-                    device = visual.device if isinstance(visual, torch.Tensor) else (
-                        hr.device if isinstance(hr, torch.Tensor) else torch.device('cpu'))
-                    audio = torch.zeros(0, 1, 256, device=device)  # Default empty shape
-        
-        if isinstance(hr, list):
-            if len(hr) == 0:
-                print("DynamicContextualGating - WARNING: hr is an empty list!")
-                # Create a default empty tensor
-                device = visual.device if isinstance(visual, torch.Tensor) else (
-                    audio.device if isinstance(audio, torch.Tensor) else torch.device('cpu'))
-                hr = torch.zeros(0, 1, 256, device=device)  # Default empty shape
-            else:
-                try:
-                    # Try to stack the tensors in the list
-                    hr = torch.stack(hr)
-                    print(f"DynamicContextualGating - Stacked hr list to tensor of shape {hr.shape}")
-                except Exception as e:
-                    print(f"DynamicContextualGating - ERROR: Could not stack hr list: {e}")
-                    # Create a default empty tensor
-                    device = visual.device if isinstance(visual, torch.Tensor) else (
-                        audio.device if isinstance(audio, torch.Tensor) else torch.device('cpu'))
-                    hr = torch.zeros(0, 1, 256, device=device)  # Default empty shape
-        
-        # Check that all inputs are tensors after potential conversion
-        if not all(isinstance(x, torch.Tensor) for x in [visual, audio, hr]):
-            print(f"DynamicContextualGating - ERROR: Not all inputs are tensors after conversion: "
-                  f"visual={type(visual)}, audio={type(audio)}, hr={type(hr)}")
-            # Create default empty tensors for any non-tensor inputs
-            device = next((x.device for x in [visual, audio, hr] if isinstance(x, torch.Tensor)), torch.device('cpu'))
-            if not isinstance(visual, torch.Tensor):
-                visual = torch.zeros(0, 1, 256, device=device)
-            if not isinstance(audio, torch.Tensor):
-                audio = torch.zeros(0, 1, 256, device=device)
-            if not isinstance(hr, torch.Tensor):
-                hr = torch.zeros(0, 1, 256, device=device)
-        
-        # Ensure consistent batch sizes or use empty batches
-        batch_sizes = [x.size(0) for x in [visual, audio, hr] if isinstance(x, torch.Tensor)]
-        if len(set(batch_sizes)) > 1:
-            print(f"DynamicContextualGating - WARNING: Inconsistent batch sizes: {batch_sizes}")
-            # If any modality has batch_size=0, use empty batch for all
-            if 0 in batch_sizes:
-                print("DynamicContextualGating - Using empty batch for all modalities")
-                device = next((x.device for x in [visual, audio, hr]), torch.device('cpu'))
-                empty_shape = (0, visual.size(1), visual.size(2))
-                visual = torch.zeros(empty_shape, device=device)
-                audio = torch.zeros(empty_shape, device=device)
-                hr = torch.zeros(empty_shape, device=device)
-        
-        # Now handle empty batch case consistently
-        if visual.size(0) == 0 or audio.size(0) == 0 or hr.size(0) == 0:
-            print("DynamicContextualGating - Handling empty batch")
-            device = visual.device
-            seq_len = max(visual.size(1), audio.size(1), hr.size(1))
-            hidden_dim = max(visual.size(2), audio.size(2), hr.size(2))
-            empty_tensor = torch.zeros(0, seq_len, hidden_dim, device=device)
-            empty_weights = (torch.zeros(0, 1, device=device), 
-                            torch.zeros(0, 1, device=device), 
-                            torch.zeros(0, 1, device=device))
-            return empty_tensor, empty_weights
+        batch_size = -1
+        seq_len = -1
+        device = None
 
-        # Get dimensions from the first non-empty tensor
-        batch_size, seq_len, hidden_dim = visual.shape
-        print(f"DynamicContextualGating - Using shapes: batch_size={batch_size}, seq_len={seq_len}, hidden_dim={hidden_dim}")
+        # Determine batch_size, seq_len, and device from available inputs
+        inputs = [(visual_feat, visual_mask), (audio_feat, audio_mask), (hr_feat, hr_mask)]
+        for feat, mask in inputs:
+            if feat is not None:
+                batch_size = feat.shape[0]
+                seq_len = feat.shape[1]
+                device = feat.device
+                break
+        if batch_size == -1:  # Fallback if all features are None (shouldn't happen with masks)
+            batch_size = (
+                visual_mask.shape[0]
+                if visual_mask is not None
+                else (audio_mask.shape[0] if audio_mask is not None else hr_mask.shape[0])
+            )
+            seq_len = 1  # Assume seq_len 1 if no features
+            device = (
+                visual_mask.device
+                if visual_mask is not None
+                else (audio_mask.device if audio_mask is not None else hr_mask.device)
+            )
 
-        # Compute modality weights
-        try:
-            alpha, beta, gamma = self.gating_network(visual, audio, hr)
-            print(f"DynamicContextualGating - Got weights with shapes: alpha={alpha.shape}, beta={beta.shape}, gamma={gamma.shape}")
-        except Exception as e:
-            print(f"DynamicContextualGating - ERROR during gating: {e}")
-            # Return default equal weights if gating fails
-            alpha = torch.ones(batch_size, 1, device=visual.device) / 3
-            beta = torch.ones(batch_size, 1, device=visual.device) / 3
-            gamma = torch.ones(batch_size, 1, device=visual.device) / 3
+        logger.debug(f"DynamicContextualGating - Input shapes: visual={visual_feat.shape if visual_feat is not None else None}, "
+                     f"audio={audio_feat.shape if audio_feat is not None else None}, "
+                     f"hr={hr_feat.shape if hr_feat is not None else None}")
+        logger.debug(f"DynamicContextualGating - Masks: V={visual_mask.sum().item()}, A={audio_mask.sum().item()}, H={hr_mask.sum().item()}")
 
-        try:
-            # Expand weights to match feature dimensions
-            alpha_expanded = alpha.unsqueeze(1).expand(-1, seq_len, -1)  # (batch_size, seq_len, 1)
-            beta_expanded = beta.unsqueeze(1).expand(-1, seq_len, -1)  # (batch_size, seq_len, 1)
-            gamma_expanded = gamma.unsqueeze(1).expand(-1, seq_len, -1)  # (batch_size, seq_len, 1)
-            
-            print(f"DynamicContextualGating - Expanded weights: alpha={alpha_expanded.shape}, beta={beta_expanded.shape}, gamma={gamma_expanded.shape}")
+        # Ensure all features have the correct batch size (they should from collate_fn)
+        # Create zero tensors for missing modalities
+        if visual_feat is None:
+            visual_feat = torch.zeros(batch_size, seq_len, self.hidden_dim, device=device)
+        if audio_feat is None:
+            audio_feat = torch.zeros(batch_size, seq_len, self.hidden_dim, device=device)
+        if hr_feat is None:
+            hr_feat = torch.zeros(batch_size, seq_len, self.hidden_dim, device=device)
 
-            # Fusion methods
-            if self.fusion_method == "weighted_sum":
-                # Simple weighted sum
-                fused = alpha_expanded * visual + beta_expanded * audio + gamma_expanded * hr
-                print(f"DynamicContextualGating - Fused output shape: {fused.shape}")
+        # Encode context using masks
+        encoded_contexts = self.context_encoder(visual_feat, audio_feat, hr_feat, visual_mask, audio_mask, hr_mask)
+        context_v = encoded_contexts["visual"]
+        context_a = encoded_contexts["audio"]
+        context_h = encoded_contexts["hr"]
 
-            elif self.fusion_method == "concat_projection":
-                # Concatenate weighted features and project
-                weighted_visual = alpha_expanded * visual
-                weighted_audio = beta_expanded * audio
-                weighted_hr = gamma_expanded * hr
+        # Calculate gating weights
+        alpha, beta, gamma = self.gating_network(context_v, context_a, context_h)
+        logger.debug(f"DynamicContextualGating - Raw weights: alpha={alpha.mean().item():.3f}, beta={beta.mean().item():.3f}, gamma={gamma.mean().item():.3f}")
 
-                concat_features = torch.cat([weighted_visual, weighted_audio, weighted_hr], dim=2)
-                fused = self.fusion_projection(concat_features)
-                print(f"DynamicContextualGating - Fused output shape: {fused.shape}")
+        # Expand weights for broadcasting: (batch, 1) -> (batch, 1, 1)
+        alpha = alpha.unsqueeze(-1)
+        beta = beta.unsqueeze(-1)
+        gamma = gamma.unsqueeze(-1)
+        logger.debug(f"DynamicContextualGating - Expanded weights: alpha={alpha.shape}, beta={beta.shape}, gamma={gamma.shape}")
 
-            else:
-                raise ValueError(f"Unsupported fusion method: {self.fusion_method}")
+        # Apply gating - Use masks here to zero out contributions from invalid samples
+        # Masks are (batch,), need (batch, 1, 1) to multiply with (batch, seq_len, hidden_dim)
+        v_mask_exp = visual_mask.unsqueeze(-1).unsqueeze(-1).float()
+        a_mask_exp = audio_mask.unsqueeze(-1).unsqueeze(-1).float()
+        h_mask_exp = hr_mask.unsqueeze(-1).unsqueeze(-1).float()
 
-            # Return fused representation and weights (for visualization)
-            return fused, (alpha[:, 0], beta[:, 0], gamma[:, 0])
-        except Exception as e:
-            print(f"DynamicContextualGating - ERROR during fusion: {e}")
-            # Return a default fused representation with equal weights
-            empty_fused = torch.zeros(batch_size, seq_len, hidden_dim, device=visual.device)
-            empty_weights = (alpha, beta, gamma)
-            return empty_fused, empty_weights
+        # Weighted sum of features, masked
+        fused = (alpha * visual_feat * v_mask_exp) + (beta * audio_feat * a_mask_exp) + (gamma * hr_feat * h_mask_exp)
+
+        logger.debug(f"DynamicContextualGating - Fused shape after gating: {fused.shape}")
+
+        # Return fused features and original (batch, 1) weights
+        gating_weights = (alpha.squeeze(-1), beta.squeeze(-1), gamma.squeeze(-1))
+        return fused, gating_weights

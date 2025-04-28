@@ -193,11 +193,11 @@ def train_model(args, config: ACMFTConfig):
     plot_confusion_matrix(test_metrics["confusion_matrix"], save_path=os.path.join(args.log_dir, "confusion_matrix.png"))
 
     # Print test metrics
-    print("\nTest Metrics:")
-    print(f"Loss: {test_metrics['loss']:.4f}")
-    print(f"Accuracy: {test_metrics['accuracy']:.4f}")
-    print(f"Macro F1: {test_metrics['macro_f1']:.4f}")
-    print(f"Weighted F1: {test_metrics['weighted_f1']:.4f}")
+    logging.info("\nTest Metrics:")
+    logging.info(f"Loss: {test_metrics['loss']:.4f}")
+    logging.info(f"Accuracy: {test_metrics['accuracy']:.4f}")
+    logging.info(f"Macro F1: {test_metrics['macro_f1']:.4f}")
+    logging.info(f"Weighted F1: {test_metrics['weighted_f1']:.4f}")
 
     # Save metrics to file
     with open(os.path.join(args.log_dir, "test_metrics.json"), "w") as f:
@@ -271,11 +271,11 @@ def test_model(args, config: ACMFTConfig):
     plot_confusion_matrix(test_metrics["confusion_matrix"], save_path=os.path.join(args.log_dir, "confusion_matrix.png"))
 
     # Print test metrics
-    print("\nTest Metrics:")
-    print(f"Loss: {test_metrics['loss']:.4f}")
-    print(f"Accuracy: {test_metrics['accuracy']:.4f}")
-    print(f"Macro F1: {test_metrics['macro_f1']:.4f}")
-    print(f"Weighted F1: {test_metrics['weighted_f1']:.4f}")
+    logging.info("\nTest Metrics:")
+    logging.info(f"Loss: {test_metrics['loss']:.4f}")
+    logging.info(f"Accuracy: {test_metrics['accuracy']:.4f}")
+    logging.info(f"Macro F1: {test_metrics['macro_f1']:.4f}")
+    logging.info(f"Weighted F1: {test_metrics['weighted_f1']:.4f}")
 
     # Save metrics to file
     with open(os.path.join(args.log_dir, "test_metrics.json"), "w") as f:
@@ -324,8 +324,8 @@ def infer(args, config: ACMFTConfig):
     model.eval()
 
     # Example inference
-    print("Inference mode: This would process input files for emotion recognition.")
-    print("To use the model for inference, integrate it into your application or use the API.")
+    logging.debug("Inference mode: This would process input files for emotion recognition.")
+    logging.debug("To use the model for inference, integrate it into your application or use the API.")
 
 
 def main():
