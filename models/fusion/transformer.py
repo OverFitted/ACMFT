@@ -63,7 +63,7 @@ class MultiHeadAttention(nn.Module):
             empty_output = torch.zeros((0, query.size(1), self.embed_dim), device=query.device)
             empty_weights = torch.zeros((0, self.num_heads, query.size(1), key.size(1)), device=query.device)
             return empty_output, empty_weights
-            
+
         batch_size, tgt_len, _ = query.size()
         src_len = key.size(1)
 
@@ -309,20 +309,20 @@ class CrossModalTransformerBlock(nn.Module):
         if visual.size(0) == 0:
             # If visual is empty, return empty tensors for all modalities
             return visual, audio, hr
-        
+
         # Check batch sizes and ensure they match
         batch_size = visual.size(0)
-        
+
         # Step 1: Self-attention for each modality
         visual_self, _ = self.self_attn_visual(visual)
-        
+
         # Only apply audio processing if it has the same batch size (i.e., not empty)
         if audio.size(0) == batch_size:
             audio_self, _ = self.self_attn_audio(audio)
         else:
             # Use a copy of the original tensor for empty audio
             audio_self = audio
-            
+
         # Only apply HR processing if it has the same batch size (i.e., not empty)
         if hr.size(0) == batch_size:
             hr_self, _ = self.self_attn_hr(hr)
@@ -338,7 +338,7 @@ class CrossModalTransformerBlock(nn.Module):
         else:
             # If audio is empty, no cross-attention, just use visual_self
             visual_from_audio = visual_self
-            
+
         if hr_self.size(0) == batch_size:
             visual_from_hr, _ = self.cross_attn_v2h(visual_self, hr_self)
         else:
@@ -348,7 +348,7 @@ class CrossModalTransformerBlock(nn.Module):
         # Audio modality attending to others - only if audio is not empty
         if audio_self.size(0) == batch_size:
             audio_from_visual, _ = self.cross_attn_a2v(audio_self, visual_self)
-            
+
             if hr_self.size(0) == batch_size:
                 audio_from_hr, _ = self.cross_attn_a2h(audio_self, hr_self)
             else:
@@ -362,7 +362,7 @@ class CrossModalTransformerBlock(nn.Module):
         # HR modality attending to others - only if HR is not empty
         if hr_self.size(0) == batch_size:
             hr_from_visual, _ = self.cross_attn_h2v(hr_self, visual_self)
-            
+
             if audio_self.size(0) == batch_size:
                 hr_from_audio, _ = self.cross_attn_h2a(hr_self, audio_self)
             else:
@@ -375,39 +375,45 @@ class CrossModalTransformerBlock(nn.Module):
 
         # Step 3: Aggregate cross-modal information for each modality
         # Adjust divisors based on available modalities
-        
+
         # Visual modality aggregation
         divisor_v = 1  # Start with 1 for visual_self
-        if audio_self.size(0) == batch_size: divisor_v += 1
-        if hr_self.size(0) == batch_size: divisor_v += 1
+        if audio_self.size(0) == batch_size:
+            divisor_v += 1
+        if hr_self.size(0) == batch_size:
+            divisor_v += 1
         visual_enhanced = (visual_self + visual_from_audio + visual_from_hr) / divisor_v
-        
+
         # Audio modality aggregation (only if audio is present)
         if audio_self.size(0) == batch_size:
             divisor_a = 1  # Start with 1 for audio_self
-            if visual_self.size(0) == batch_size: divisor_a += 1
-            if hr_self.size(0) == batch_size: divisor_a += 1
+            if visual_self.size(0) == batch_size:
+                divisor_a += 1
+            if hr_self.size(0) == batch_size:
+                divisor_a += 1
             audio_enhanced = (audio_self + audio_from_visual + audio_from_hr) / divisor_a
         else:
             audio_enhanced = audio_self
-            
+
         # HR modality aggregation (only if HR is present)
         if hr_self.size(0) == batch_size:
             divisor_h = 1  # Start with 1 for hr_self
-            if visual_self.size(0) == batch_size: divisor_h += 1
-            if audio_self.size(0) == batch_size: divisor_h += 1
+            if visual_self.size(0) == batch_size:
+                divisor_h += 1
+            if audio_self.size(0) == batch_size:
+                divisor_h += 1
             hr_enhanced = (hr_self + hr_from_visual + hr_from_audio) / divisor_h
         else:
             hr_enhanced = hr_self
 
         # Step 4: Final feed-forward and normalization (only for non-empty modalities)
         visual_output = visual_enhanced + self.dropout(self.ffn_visual(self.norm_visual(visual_enhanced)))
-        
+
         if audio_enhanced.size(0) == batch_size:
             audio_output = audio_enhanced + self.dropout(self.ffn_audio(self.norm_audio(audio_enhanced)))
         else:
             audio_output = audio_enhanced
-            
+
         if hr_enhanced.size(0) == batch_size:
             hr_output = hr_enhanced + self.dropout(self.ffn_hr(self.norm_hr(hr_enhanced)))
         else:

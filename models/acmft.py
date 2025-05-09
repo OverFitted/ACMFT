@@ -153,7 +153,7 @@ class ACMFT(nn.Module):
         visual: Optional[torch.Tensor],
         audio: Optional[torch.Tensor],
         hr: Optional[torch.Tensor],
-        visual_mask: Optional[torch.Tensor] = None, # Added mask arguments
+        visual_mask: Optional[torch.Tensor] = None,
         audio_mask: Optional[torch.Tensor] = None,
         hr_mask: Optional[torch.Tensor] = None,
         return_weights: bool = False,

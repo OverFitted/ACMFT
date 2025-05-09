@@ -53,10 +53,14 @@ class ContextEncoder(nn.Module):
             Dictionary containing encoded context for each modality.
         """
         encoded_contexts = {}
-        logger.debug(f"ContextEncoder - Input shapes: visual={visual_feat.shape if visual_feat is not None else None}, "
-                     f"audio={audio_feat.shape if audio_feat is not None else None}, "
-                     f"hr={hr_feat.shape if hr_feat is not None else None}")
-        logger.debug(f"ContextEncoder - Masks: V={visual_mask.sum().item()}, A={audio_mask.sum().item()}, H={hr_mask.sum().item()}")
+        logger.debug(
+            f"ContextEncoder - Input shapes: visual={visual_feat.shape if visual_feat is not None else None}, "
+            f"audio={audio_feat.shape if audio_feat is not None else None}, "
+            f"hr={hr_feat.shape if hr_feat is not None else None}"
+        )
+        logger.debug(
+            f"ContextEncoder - Masks: V={visual_mask.sum().item()}, A={audio_mask.sum().item()}, H={hr_mask.sum().item()}"
+        )
 
         for name, feat, mask in [
             ("visual", visual_feat, visual_mask),
@@ -190,9 +194,11 @@ class GatingNetwork(nn.Module):
         Returns:
             Tuple of gating weights (alpha, beta, gamma) after softmax.
         """
-        logger.debug(f"GatingNetwork - Input shapes: visual={context_v.shape if context_v is not None else None}, "
-                     f"audio={context_a.shape if context_a is not None else None}, "
-                     f"hr={context_h.shape if context_h is not None else None}")
+        logger.debug(
+            f"GatingNetwork - Input shapes: visual={context_v.shape if context_v is not None else None}, "
+            f"audio={context_a.shape if context_a is not None else None}, "
+            f"hr={context_h.shape if context_h is not None else None}"
+        )
 
         # Compute raw gating scores
         score_v = (
@@ -309,10 +315,14 @@ class DynamicContextualGating(nn.Module):
                 else (audio_mask.device if audio_mask is not None else hr_mask.device)
             )
 
-        logger.debug(f"DynamicContextualGating - Input shapes: visual={visual_feat.shape if visual_feat is not None else None}, "
-                     f"audio={audio_feat.shape if audio_feat is not None else None}, "
-                     f"hr={hr_feat.shape if hr_feat is not None else None}")
-        logger.debug(f"DynamicContextualGating - Masks: V={visual_mask.sum().item()}, A={audio_mask.sum().item()}, H={hr_mask.sum().item()}")
+        logger.debug(
+            f"DynamicContextualGating - Input shapes: visual={visual_feat.shape if visual_feat is not None else None}, "
+            f"audio={audio_feat.shape if audio_feat is not None else None}, "
+            f"hr={hr_feat.shape if hr_feat is not None else None}"
+        )
+        logger.debug(
+            f"DynamicContextualGating - Masks: V={visual_mask.sum().item()}, A={audio_mask.sum().item()}, H={hr_mask.sum().item()}"
+        )
 
         # Ensure all features have the correct batch size (they should from collate_fn)
         # Create zero tensors for missing modalities
@@ -331,7 +341,9 @@ class DynamicContextualGating(nn.Module):
 
         # Calculate gating weights
         alpha, beta, gamma = self.gating_network(context_v, context_a, context_h)
-        logger.debug(f"DynamicContextualGating - Raw weights: alpha={alpha.mean().item():.3f}, beta={beta.mean().item():.3f}, gamma={gamma.mean().item():.3f}")
+        logger.debug(
+            f"DynamicContextualGating - Raw weights: alpha={alpha.mean().item():.3f}, beta={beta.mean().item():.3f}, gamma={gamma.mean().item():.3f}"
+        )
 
         # Expand weights for broadcasting: (batch, 1) -> (batch, 1, 1)
         alpha = alpha.unsqueeze(-1)
