@@ -187,7 +187,6 @@ class ACMFT(nn.Module):
             batch_size = hr.size(0)
             device = hr.device
 
-        # logging.debug(f"ACMFT forward: batch_size={batch_size}, device={device}")
         # if visual is not None:
         #     logging.debug(f"  Visual input shape: {visual.shape}")
         # if audio is not None:
@@ -239,15 +238,11 @@ class ACMFT(nn.Module):
         if hr_features is None:
             hr_features = torch.zeros(batch_size, seq_len, self.config.hr_dim, device=device)
             hr_mask = torch.zeros(batch_size, dtype=torch.bool, device=device) # Default mask
-            # logging.warning("  HR features are None, using zeros.")
         elif hr_features.ndim == 2:
             hr_features = hr_features.unsqueeze(1)
         if hr_mask is None:
             hr_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
 
-        # logging.debug(f"  Visual features shape after prep: {visual_features.shape}")
-        # logging.debug(f"  Audio features shape after prep: {audio_features.shape}")
-        # logging.debug(f"  HR features shape after prep: {hr_features.shape}")
 
         # Project each modality to common embedding space
         try:
@@ -258,10 +253,6 @@ class ACMFT(nn.Module):
             logging.error(f"Error during modality embedding: {e}")
             raise e
 
-        # logging.debug(f"  Visual embedding shape: {visual_emb.shape}")
-        # logging.debug(f"  Audio embedding shape: {audio_emb.shape}")
-        # logging.debug(f"  HR embedding shape: {hr_emb.shape}")
-
         # Process through cross-modal transformer blocks
         for i, layer in enumerate(self.cross_modal_layers):
             try:
@@ -271,12 +262,10 @@ class ACMFT(nn.Module):
                     visual_emb, audio_emb, hr_emb,
                     visual_mask=visual_mask, audio_mask=audio_mask, hr_mask=hr_mask
                 )
-                # logging.debug(f"  After CrossModal Layer {i}: V={visual_emb.shape}, A={audio_emb.shape}, H={hr_emb.shape}")
             except TypeError as te:
                 # Fallback if layer doesn't accept masks
                 if "mask" in str(te):
                     visual_emb, audio_emb, hr_emb = layer(visual_emb, audio_emb, hr_emb)
-                    # logging.debug(f"  After CrossModal Layer {i} (no masks): V={visual_emb.shape}, A={audio_emb.shape}, H={hr_emb.shape}")
                 else:
                     logging.error(f"Error in CrossModal Layer {i}: {te}")
                     raise te
@@ -290,8 +279,6 @@ class ACMFT(nn.Module):
                 visual_emb, audio_emb, hr_emb,
                 visual_mask=visual_mask, audio_mask=audio_mask, hr_mask=hr_mask
             )
-            # logging.debug(f"  Fused shape after gating: {fused.shape}")
-            # logging.debug(f"  Gating weights: alpha={alpha.shape}, beta={beta.shape}, gamma={gamma.shape}")
         except Exception as e:
             logging.error(f"Error during contextual gating: {e}")
             raise e
@@ -299,15 +286,12 @@ class ACMFT(nn.Module):
         # Global pooling (if sequence length > 1)
         if fused.size(1) > 1:
             fused = torch.mean(fused, dim=1)
-            # logging.debug(f"  Fused shape after pooling: {fused.shape}")
         else:
             fused = fused.squeeze(1)
-            # logging.debug(f"  Fused shape after squeeze: {fused.shape}")
 
         # Emotion classification
         try:
             emotion_logits = self.classifier(fused)
-            # logging.debug(f"  Logits shape: {emotion_logits.shape}")
         except Exception as e:
             logging.error(f"Error during classification: {e}")
             raise e
