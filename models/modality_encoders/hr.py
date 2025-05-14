@@ -91,11 +91,11 @@ class HRPreprocessor(nn.Module):
         if signals is None or (isinstance(signals, list) and len(signals) == 0):
             # Return an empty tensor with correct dimensionality for HR signals
             return torch.zeros((0, 256 if self.target_length is None else self.target_length))
-            
+
         # Handle empty tensor
         if isinstance(signals, torch.Tensor) and signals.size(0) == 0:
             return torch.zeros((0, 256 if self.target_length is None else self.target_length))
-            
+
         # Convert to torch tensor if needed
         if isinstance(signals, np.ndarray):
             signals = torch.from_numpy(signals).float()
@@ -103,7 +103,7 @@ class HRPreprocessor(nn.Module):
             # Handle empty list check (additional safeguard)
             if len(signals) == 0:
                 return torch.zeros((0, 256 if self.target_length is None else self.target_length))
-                
+
             # Convert list of arrays to tensor
             if isinstance(signals[0], np.ndarray):
                 signals = [torch.from_numpy(s).float() for s in signals]
@@ -129,7 +129,7 @@ class HRPreprocessor(nn.Module):
             # Check for empty batch before filtering
             if signals.size(0) == 0:
                 return torch.zeros((0, 256 if self.target_length is None else self.target_length))
-                
+
             # Process each signal in the batch
             for i in range(signals.size(0)):
                 signal_np = signals[i].cpu().numpy()
@@ -156,9 +156,7 @@ class HRPreprocessor(nn.Module):
                     # we need to handle each signal separately
                     resampled_length = int(signal.size(-1) * (self.sample_rate / sr))
                     resampled = (
-                        F.interpolate(
-                            signal.unsqueeze(0).unsqueeze(0), size=resampled_length, mode="linear", align_corners=False
-                        )
+                        F.interpolate(signal.unsqueeze(0).unsqueeze(0), size=resampled_length, mode="linear", align_corners=False)
                         .squeeze(0)
                         .squeeze(0)
                     )
@@ -254,7 +252,7 @@ class CNNHRFeatureExtractor(nn.Module):
             features: Extracted features (batch_size, output_dim)
         """
         batch_size = x.size(0)
-        
+
         # Handle empty input
         if batch_size == 0:
             # Return empty tensor with the correct feature dimension

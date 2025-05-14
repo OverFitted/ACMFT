@@ -195,7 +195,9 @@ class YOLOFaceDetector(nn.Module):
 
             # Final check for shape consistency
             if faces.shape[0] != probs.shape[0]:
-                logging.warning(f"Warning: Mismatch between faces batch size ({faces.shape[0]}) and probs batch size ({probs.shape[0]}). Adjusting.")
+                logging.warning(
+                    f"Warning: Mismatch between faces batch size ({faces.shape[0]}) and probs batch size ({probs.shape[0]}). Adjusting."
+                )
                 # Attempt to fix based on probs size, assuming probs is more reliable after list processing
                 target_bs = probs.shape[0]
                 # Fallback to zeros with the target batch size
