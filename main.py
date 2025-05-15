@@ -37,8 +37,8 @@ def parse_args():
         "--mode",
         type=str,
         default="train",
-        choices=["train", "test", "infer"],
-        help="Operation mode: train, test, or infer",
+        choices=["train", "test"],
+        help="Operation mode: train or test",
     )
 
     # Data paths
@@ -302,32 +302,6 @@ def test_model(args, config: ACMFTConfig):
         )
 
 
-def infer(args, config: ACMFTConfig):
-    """
-    Run inference with the ACMFT model.
-
-    Args:
-        args: Command-line arguments
-        config: Model configuration
-    """
-    # Create model
-    model = create_model(args, config)
-
-    # Load checkpoint
-    if args.resume is None:
-        raise ValueError("Must specify checkpoint to load for inference")
-
-    checkpoint = torch.load(args.resume, map_location=args.device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-
-    # Set model to evaluation mode
-    model.eval()
-
-    # Example inference
-    logging.debug("Inference mode: This would process input files for emotion recognition.")
-    logging.debug("To use the model for inference, integrate it into your application or use the API.")
-
-
 def main():
     """
     Main function.
@@ -373,8 +347,6 @@ def main():
         train_model(args, config)
     elif args.mode == "test":
         test_model(args, config)
-    elif args.mode == "infer":
-        infer(args, config)
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
 
