@@ -212,11 +212,11 @@ class ACMFT(nn.Module):
         # _prepare_modality handles None inputs internally
         visual_features, audio_features, hr_features = self._prepare_modality(visual, audio, hr)
 
-        # --- Feature processing logic (assuming _prepare_modality returns features or None) ---
+        # --- Feature processing logic ---
         seq_len = 1  # Default sequence length after encoders (can be adapted)
 
         # Handle cases where encoders might return None or features need default values
-        # Also create default masks if they are None
+        # Create default masks if they are None
         if visual_features is None:
             visual_features = torch.zeros(batch_size, seq_len, self.config.visual_dim, device=device)
             visual_mask = torch.zeros(batch_size, dtype=torch.bool, device=device) # Default mask
@@ -257,7 +257,6 @@ class ACMFT(nn.Module):
         for i, layer in enumerate(self.cross_modal_layers):
             try:
                 # Pass masks to cross-modal layers if they accept them (optional)
-                # Assuming CrossModalTransformerBlock.forward accepts masks as keyword args
                 visual_emb, audio_emb, hr_emb = layer(
                     visual_emb, audio_emb, hr_emb,
                     visual_mask=visual_mask, audio_mask=audio_mask, hr_mask=hr_mask

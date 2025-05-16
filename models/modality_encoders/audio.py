@@ -45,7 +45,7 @@ class AudioPreprocessor(nn.Module):
                 - np.ndarray: (batch_size, time)
                 - List[np.ndarray/torch.Tensor]: List of audio waveforms
             sample_rates: Sample rates of input audio. If not provided,
-                          assumes audio is already at self.sample_rate.
+                          audio is already at self.sample_rate.
 
         Returns:
             processed_audio: Preprocessed audio (batch_size, time)
@@ -253,7 +253,7 @@ class AudioEncoder(nn.Module):
         self.feature_extractor = Wav2Vec2FeatureExtractorWrapper(
             model_name=model_name,
             output_dim=output_dim,
-            use_custom_dim=(output_dim != 768),  # Assuming 768 is the base wav2vec dim
+            use_custom_dim=(output_dim != 768),  # 768 is the base wav2vec dim
             feature_aggregation=feature_aggregation,
             freeze_feature_encoder=freeze_feature_encoder,
             device=str(self.device),  # Pass device string to wrapper

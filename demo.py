@@ -212,11 +212,10 @@ def load_inputs(args) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], O
                             break
 
                     if hr_column is None and len(df.columns) > 1:
-                        # Assume the second column contains HR data
+                        # Second column contains HR data
                         hr_column = df.columns[1]
 
                     if hr_column is None:
-                        # Just use the first column
                         hr_column = df.columns[0]
 
                     hr_signal = df[hr_column].values

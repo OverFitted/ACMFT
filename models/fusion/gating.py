@@ -308,7 +308,7 @@ class DynamicContextualGating(nn.Module):
                 if visual_mask is not None
                 else (audio_mask.shape[0] if audio_mask is not None else hr_mask.shape[0])
             )
-            seq_len = 1  # Assume seq_len 1 if no features
+            seq_len = 1  # seq_len 1 if no features
             device = (
                 visual_mask.device
                 if visual_mask is not None

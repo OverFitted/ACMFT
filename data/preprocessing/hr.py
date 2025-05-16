@@ -120,11 +120,10 @@ def load_hr_signal(file_path: Union[str, Path]) -> Optional[np.ndarray]:
                     break
 
             if hr_column is None and len(df.columns) > 1:
-                # Assume the second column contains HR data
+                # Second column contains HR data
                 hr_column = df.columns[1]
 
             if hr_column is None:
-                # Just use the first column
                 hr_column = df.columns[0]
 
             signal = df[hr_column].values
@@ -361,7 +360,7 @@ def detect_r_peaks(signal: np.ndarray, fs: float = 256.0) -> Tuple[np.ndarray, n
     filtered_signal = bandpass_filter_signal(signal, 5.0, 15.0, fs)
 
     # Find peaks with minimum distance based on sampling rate
-    # (assuming maximum heart rate of 180 BPM)
+    # (maximum heart rate of 180 BPM)
     min_distance = int(fs * 60 / 180)
 
     # Find peaks

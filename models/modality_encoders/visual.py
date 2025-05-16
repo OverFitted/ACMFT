@@ -198,7 +198,6 @@ class YOLOFaceDetector(nn.Module):
                 logging.warning(
                     f"Warning: Mismatch between faces batch size ({faces.shape[0]}) and probs batch size ({probs.shape[0]}). Adjusting."
                 )
-                # Attempt to fix based on probs size, assuming probs is more reliable after list processing
                 target_bs = probs.shape[0]
                 # Fallback to zeros with the target batch size
                 faces = torch.zeros(target_bs, 3, self.image_size, self.image_size, device=self.device)
@@ -261,7 +260,7 @@ class YOLOFaceDetector(nn.Module):
                 img_np = image.cpu().numpy()
                 # If the tensor has values outside [0, 1], normalize to [0, 255]
                 if img_np.max() > 1.0:
-                    img_np = img_np.astype(np.uint8)  # Assuming values are already in [0, 255]
+                    img_np = img_np.astype(np.uint8)  # values are already in [0, 255]
                 else:
                     img_np = (img_np * 255).astype(np.uint8)  # Convert from [0, 1] to [0, 255]
         elif isinstance(image, np.ndarray):
@@ -274,7 +273,7 @@ class YOLOFaceDetector(nn.Module):
                     # Already in [0, 255] range
                     img_np = image.astype(np.uint8)
             else:
-                # Integer type, assume already in correct range
+                # Integer type, already in correct range
                 img_np = image
         elif isinstance(image, Image.Image):
             img_np = np.array(image)
@@ -512,7 +511,7 @@ class VisualEncoder(nn.Module):
                         # Handle unexpected type or raise error
                         logging.warning(f"Warning: Unsupported image type {type(img)} when detect_faces=False")
                         continue  # Or handle appropriately
-                    # Resize and convert to tensor (assuming 3 channels)
+                    # Resize and convert to tensor (3 channels)
                     img_resized = img_pil.resize((self.face_detector.image_size, self.face_detector.image_size))
                     img_tensor = torch.tensor(np.array(img_resized), device=self.device).permute(2, 0, 1).float() / 255.0
                     processed_images.append(img_tensor)
@@ -521,7 +520,7 @@ class VisualEncoder(nn.Module):
                 else:
                     faces = torch.empty(0, 3, self.face_detector.image_size, self.face_detector.image_size, device=self.device)
             elif isinstance(images, torch.Tensor):
-                faces = images  # Assume tensor is already correct shape/type
+                faces = images  # tensor is already correct shape/type
             else:
                 raise TypeError(f"Unsupported input type {type(images)} when detect_faces=False")
 

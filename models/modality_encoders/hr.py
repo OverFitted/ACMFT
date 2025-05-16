@@ -82,7 +82,7 @@ class HRPreprocessor(nn.Module):
                 - np.ndarray: (batch_size, time)
                 - List[np.ndarray/torch.Tensor]: List of HR signals
             sample_rates: Sample rates of input signals. If not provided,
-                          assumes signals are already at self.sample_rate.
+                          signals are already at self.sample_rate.
 
         Returns:
             processed_signals: Preprocessed HR signals (batch_size, time)
